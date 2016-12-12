@@ -13,8 +13,9 @@ jdk:
   - oraclejdk8
 
 matrix:
-  - env: CMD="./.travisbuild.sh geomesa-accumulo/geomesa-accumulo-distributed-runtime"
-  - env: CMD="./.travisbuild.sh geomesa-spark"
+  include:
+     - env: CMD="./.travisbuild.sh geomesa-accumulo/geomesa-accumulo-distributed-runtime"
+     - env: CMD="./.travisbuild.sh geomesa-spark"
   
 script:
   - $CMD
