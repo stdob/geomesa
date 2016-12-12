@@ -17,7 +17,7 @@ matrix:
   - env: CMD="./.travisbuild.sh geomesa-spark"
   
 script:
-  - ./.travisbuild.sh $CMD
+  - $CMD
 
 notifications:
   webhooks:
