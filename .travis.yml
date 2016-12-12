@@ -2,6 +2,7 @@
 sudo: false
 
 before_script:
+  - export MAVEN_OPTS="-Xmx1g -Djava.net.preferIPv4Stack=true"
   - export MAVEN_SKIP_RC=true
 
 cache:
@@ -11,9 +12,12 @@ cache:
 jdk:
   - oraclejdk8
 
+matrix:
+  - env: CMD="./.travisbuild.sh geomesa-accumulo/geomesa-accumulo-distributed-runtime"
+  - env: CMD="./.travisbuild.sh geomesa-spark"
+  
 script:
-  - export MAVEN_OPTS="-Xmx1g -Djava.net.preferIPv4Stack=true"
-  - ./.travisbuild.sh
+  - ./.travisbuild.sh $CMD
 
 notifications:
   webhooks:
