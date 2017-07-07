@@ -37,7 +37,9 @@ class LambdaQueryRunner(persistence: DataStore, transients: LoadingCache[String,
   // TODO pass explain through?
 
   override def runQuery(sft: SimpleFeatureType, query: Query, explain: Explainer): CloseableIterator[SimpleFeature] = {
-    if (query.getHints.isLambdaQueryPersistent && query.getHints.isLambdaQueryTransient) {
+    val hints = configureQuery(sft, query).getHints
+
+    if (hints.isLambdaQueryPersistent && hints.isLambdaQueryTransient) {
       runMergedQuery(sft, query, explain)
     } else if (query.getHints.isLambdaQueryPersistent) {
       SelfClosingIterator(persistence.getFeatureReader(query, Transaction.AUTO_COMMIT))
