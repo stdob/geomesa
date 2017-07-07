@@ -14,6 +14,7 @@ import java.util.Date
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.arrow.memory.RootAllocator
 import org.geotools.data.{DataStoreFinder, DataUtilities, Query, Transaction}
+import org.geotools.factory.Hints
 import org.locationtech.geomesa.arrow.io.SimpleFeatureArrowFileReader
 import org.locationtech.geomesa.features.ScalaSimpleFeature
 import org.locationtech.geomesa.filter.function.Convert2ViewerFunction
@@ -148,6 +149,11 @@ class LambdaDataStoreTest extends LambdaTest with LazyLogging {
             query.getHints.put(hint, java.lang.Boolean.FALSE)
             SelfClosingIterator(ds.getFeatureReader(query, Transaction.AUTO_COMMIT)).toSeq mustEqual feature
         }
+
+        val query = new Query(sft.getTypeName)
+        val map: java.util.Map[String, String] = Map("LAMBDA_QUERY_PERSISTENT" -> "false")
+        query.getHints.put(Hints.VIRTUAL_TABLE_PARAMETERS, map)
+        SelfClosingIterator(ds.getFeatureReader(query, Transaction.AUTO_COMMIT)).toList mustEqual features.drop(1).toList
 
         // persist both features to the long-term storage
         clock.tick = 151
