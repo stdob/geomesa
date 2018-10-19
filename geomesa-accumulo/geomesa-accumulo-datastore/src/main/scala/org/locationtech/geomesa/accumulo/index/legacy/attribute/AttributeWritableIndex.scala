@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -10,25 +10,27 @@
 package org.locationtech.geomesa.accumulo.index.legacy.attribute
 
 import java.nio.charset.StandardCharsets
+import java.time.ZoneOffset
+import java.time.format.{DateTimeFormatter, DateTimeFormatterBuilder}
+import java.time.temporal.ChronoField
 import java.util.{Date, Locale, Collection => JCollection}
 
-import com.google.common.collect.ImmutableSortedSet
 import com.google.common.primitives.Bytes
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.accumulo.core.data.{Range => AccRange}
 import org.apache.hadoop.io.Text
 import org.calrissian.mango.types.{LexiTypeEncoders, SimpleTypeEncoders, TypeEncoder}
-import org.joda.time.format.ISODateTimeFormat
 import org.locationtech.geomesa.accumulo.data._
 import org.locationtech.geomesa.accumulo.index.AccumuloAttributeIndex.AttributeSplittable
 import org.locationtech.geomesa.accumulo.index.AccumuloFeatureIndex
 import org.locationtech.geomesa.accumulo.index.legacy.attribute.AttributeWritableIndex.{NullByteArray, decode}
-import org.locationtech.geomesa.index.index.AttributeIndex.AttributeRowDecoder
+import org.locationtech.geomesa.index.index.attribute.AttributeIndex.AttributeRowDecoder
 import org.locationtech.geomesa.utils.geotools.RichAttributeDescriptors.RichAttributeDescriptor
 import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes
+import org.locationtech.geomesa.utils.text.DateParsing
 import org.opengis.feature.`type`.AttributeDescriptor
-import org.opengis.feature.simple.SimpleFeatureType
+import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 
 import scala.collection.JavaConversions._
 import scala.collection.JavaConverters._
@@ -40,24 +42,26 @@ import scala.util.{Failure, Success, Try}
 trait AttributeWritableIndex extends AccumuloFeatureIndex
     with AttributeSplittable with AttributeRowDecoder with LazyLogging {
 
-  override def getSplits(sft: SimpleFeatureType): Seq[Array[Byte]] = {
+  override def getSplits(sft: SimpleFeatureType, partition: Option[String]): Seq[Array[Byte]] = {
     val indices = SimpleFeatureTypes.getSecondaryIndexedAttributes(sft).map(d => sft.indexOf(d.getLocalName))
     indices.map(i => AttributeWritableIndex.getRowPrefix(sft, i))
   }
 
-  override def configureSplits(sft: SimpleFeatureType, ds: AccumuloDataStore): Unit = {
+  override def configureSplits(sft: SimpleFeatureType, ds: AccumuloDataStore, partition: Option[String]): Unit = {
     val splits = getSplits(sft)
     if (splits.nonEmpty) {
       val texts = splits.map(new Text(_))
-      ds.tableOps.addSplits(getTableName(sft.getTypeName, ds), ImmutableSortedSet.copyOf(texts.toArray))
+      getTableNames(sft, ds, partition).foreach { table =>
+        ds.tableOps.addSplits(table, new java.util.TreeSet(texts.asJava))
+      }
     }
   }
 
-  override def getIdFromRow(sft: SimpleFeatureType): (Array[Byte], Int, Int) => String = {
+  override def getIdFromRow(sft: SimpleFeatureType): (Array[Byte], Int, Int, SimpleFeature) => String = {
     // drop the encoded value and the date field (12 bytes) if it's present - the rest of the row is the ID
     val from = if (sft.isTableSharing) 3 else 2  // exclude feature byte and index bytes
     val prefix = if (sft.getDtgField.isDefined) 13 else 1
-    (row, offset, length) => {
+    (row, offset, length, feature) => {
       val start = row.indexOf(AttributeWritableIndex.NullByteArray.head, from + offset) + prefix
       new String(row, start, length + offset - start, StandardCharsets.UTF_8)
     }
@@ -105,7 +109,15 @@ object AttributeWritableIndex extends LazyLogging {
 
   private val typeRegistry   = LexiTypeEncoders.LEXI_TYPES
   private val simpleEncoders = SimpleTypeEncoders.SIMPLE_TYPES.getAllEncoders
-  private val dateFormat     = ISODateTimeFormat.dateTime()
+
+  private val dateFormat =
+    new DateTimeFormatterBuilder()
+        .append(DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+        .appendFraction(ChronoField.MILLI_OF_SECOND, 3, 3, true)
+        .optionalStart()
+        .appendOffsetId()
+        .toFormatter(Locale.US)
+        .withZone(ZoneOffset.UTC)
 
   private type TryEncoder = Try[(TypeEncoder[Any, String], TypeEncoder[_, String])]
 
@@ -321,7 +333,7 @@ object AttributeWritableIndex extends LazyLogging {
     }
     val result = if (desired == classOf[Date] && current == classOf[String]) {
       // try to parse the string as a date - right now we support just ISO format
-      Try(dateFormat.parseDateTime(value.asInstanceOf[String]).toDate)
+      Try(DateParsing.parseDate(value.asInstanceOf[String], dateFormat))
     } else {
       // cheap way to convert between basic classes (string, int, double, etc) - encode the value
       // to a string and then decode to the desired class

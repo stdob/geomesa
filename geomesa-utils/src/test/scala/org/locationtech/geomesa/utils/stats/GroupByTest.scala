@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -326,7 +326,7 @@ class GroupByTest extends Specification with StatTestHelper {
             val enums1 = enumerationStat(groupBy)
             val enums2 = enumerationStat(unpacked.asInstanceOf[GroupBy[Int]])
 
-            enums2.attribute mustEqual enums1.attribute
+            enums2.property mustEqual enums1.property
             enums2.enumeration mustEqual enums1.enumeration
             enums2.size mustEqual enums1.size
             enums2.toJson mustEqual enums1.toJson
@@ -434,7 +434,7 @@ class GroupByTest extends Specification with StatTestHelper {
 
                 unpackedHist must beAnInstanceOf[Histogram[Int]]
                 unpackedHist.length mustEqual groupByHist.length
-                unpackedHist.attribute mustEqual groupByHist.attribute
+                unpackedHist.property mustEqual groupByHist.property
               }
             }
 

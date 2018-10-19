@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -9,21 +9,24 @@
 package org.locationtech.geomesa.fs.tools.status
 
 import com.beust.jcommander.Parameters
-import org.locationtech.geomesa.fs.tools.{FsDataStoreCommand, FsParams}
+import org.locationtech.geomesa.fs.tools.FsDataStoreCommand
+import org.locationtech.geomesa.fs.tools.FsDataStoreCommand.FsParams
+import org.locationtech.geomesa.fs.tools.status.FsGetPartitionsCommand.FsGetPartitionsParams
 import org.locationtech.geomesa.tools.{Command, RequiredTypeNameParam}
 
-import scala.collection.JavaConversions._
-
 class FsGetPartitionsCommand extends FsDataStoreCommand {
-  override val params = new FsGetPartitionsParams
 
   override val name: String = "get-partitions"
+  override val params = new FsGetPartitionsParams
 
   override def execute(): Unit = withDataStore { ds =>
-    Command.user.info(s"Partitions for type ${params.featureName}")
-    ds.storage.getMetadata(params.featureName).getPartitions.foreach(Command.output.info)
+    import scala.collection.JavaConverters._
+    Command.user.info(s"Partitions for type ${params.featureName}:")
+    ds.storage(params.featureName).getMetadata.getPartitions.asScala.map(_.name).sorted.foreach(Command.output.info)
   }
 }
 
-@Parameters(commandDescription = "List GeoMesa feature type for a given Fs resource")
-class FsGetPartitionsParams extends FsParams with RequiredTypeNameParam
+object FsGetPartitionsCommand {
+  @Parameters(commandDescription = "List GeoMesa feature type for a given Fs resource")
+  class FsGetPartitionsParams extends FsParams with RequiredTypeNameParam
+}

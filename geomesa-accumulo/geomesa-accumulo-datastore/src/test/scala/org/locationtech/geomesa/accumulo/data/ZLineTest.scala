@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -48,9 +48,12 @@ class ZLineTest extends Specification with TestWithDataStore {
   "ZLines" should {
     "add features" in {
       skipped("testing")
-      val scanner = ds.connector.createScanner(Z3Index.getTableName(sft.getTypeName, ds), new Authorizations())
-      println(scanner.toSeq.length)
-      scanner.close()
+      Z3Index.getTableNames(sft, ds).foreach { table =>
+        println(table)
+        val scanner = ds.connector.createScanner(table, new Authorizations())
+        println(scanner.toSeq.length)
+        scanner.close()
+      }
       success
     }
     "return features that are contained" in {

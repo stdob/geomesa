@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -94,7 +94,7 @@ class KryoBufferSimpleFeature(sft: SimpleFeatureType,
   def setBuffer(bytes: Array[Byte], offset: Int, length: Int): Unit = {
     this.offset = offset
     this.length = length
-    input.setBuffer(bytes, offset, offset + length)
+    input.setBuffer(bytes, offset, length)
     // reset our offsets
     input.setPosition(offset + 1) // skip version
     startOfOffsets = offset + input.readInt()
@@ -183,6 +183,9 @@ class KryoBufferSimpleFeature(sft: SimpleFeatureType,
       reserializeTransform
     }
   }
+
+  def getTransform: Option[(String, SimpleFeatureType)] =
+    for { t <- Option(transforms); s <- Option(transformSchema) } yield { (t, s) }
 
   def getDateAsLong(index: Int): Long = {
     val offset = offsets(index)
@@ -284,5 +287,5 @@ class KryoBufferSimpleFeature(sft: SimpleFeatureType,
 }
 
 object KryoBufferSimpleFeature {
-  val longReader = KryoFeatureDeserialization.matchReader(ObjectType.LONG)
+  val longReader: Input => AnyRef = KryoFeatureDeserialization.matchReader(Seq(ObjectType.LONG))
 }

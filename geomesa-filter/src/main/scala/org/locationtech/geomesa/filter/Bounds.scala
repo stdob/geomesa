@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -44,6 +44,13 @@ case class Bounds[T](lower: Bound[T], upper: Bound[T]) {
     * @return
     */
   def isRange: Boolean = lower.value.isEmpty || lower.value != upper.value
+
+  /**
+    * Covers a single value
+    *
+    * @return
+    */
+  def isEquals: Boolean = !isRange
 
   override def toString: String = {
     (if (lower.inclusive) { "[" } else { "(" }) + lower.value.getOrElse("-\u221E") + "," +

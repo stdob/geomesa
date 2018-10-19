@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -785,7 +785,7 @@ object GeohashUtils
    */
   def decomposeGeometry(targetGeom: Geometry,
                         maxSize: Int = 100,
-                        resolutions: ResolutionRange = new ResolutionRange(0, 40, 5),
+                        resolutions: ResolutionRange = ResolutionRange(0, 40, 5),
                         relaxFit: Boolean = true): List[GeoHash] =
   // quick hit to avoid wasting time for single points
     targetGeom match {

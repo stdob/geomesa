@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -13,7 +13,7 @@ import org.locationtech.geomesa.kafka.tools.data.{KafkaCreateSchemaCommand, Kafk
 import org.locationtech.geomesa.kafka.tools.export.{KafkaExportCommand, KafkaListenCommand}
 import org.locationtech.geomesa.kafka.tools.ingest.KafkaIngestCommand
 import org.locationtech.geomesa.kafka.tools.status._
-import org.locationtech.geomesa.tools.status.{ClasspathCommand, ConfigureCommand, HelpCommand, VersionCommand}
+import org.locationtech.geomesa.tools.status._
 import org.locationtech.geomesa.tools.{Command, Runner}
 
 object KafkaRunner extends Runner {
@@ -32,6 +32,7 @@ object KafkaRunner extends Runner {
     new HelpCommand(this, jc),
     new ConfigureCommand,
     new ClasspathCommand,
+    new ScalaConsoleCommand,
     new VersionCommand
   )
 

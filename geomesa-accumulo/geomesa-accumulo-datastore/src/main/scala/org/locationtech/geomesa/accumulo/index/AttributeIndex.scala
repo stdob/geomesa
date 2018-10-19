@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -10,7 +10,6 @@ package org.locationtech.geomesa.accumulo.index
 
 import java.util.Map.Entry
 
-import com.google.common.collect.ImmutableSortedSet
 import org.apache.accumulo.core.client.IteratorSetting
 import org.apache.accumulo.core.data.{Key, Mutation, Range, Value}
 import org.apache.hadoop.io.Text
@@ -26,12 +25,14 @@ import org.locationtech.geomesa.accumulo.iterators._
 import org.locationtech.geomesa.features.SerializationType
 import org.locationtech.geomesa.filter.{FilterHelper, andOption, partitionPrimarySpatials, partitionPrimaryTemporals}
 import org.locationtech.geomesa.index.api.{FilterStrategy, QueryPlan}
-import org.locationtech.geomesa.index.index.AttributeIndex
+import org.locationtech.geomesa.index.conf.partition.TablePartition
+import org.locationtech.geomesa.index.index.ShardStrategy
+import org.locationtech.geomesa.index.index.attribute.AttributeIndex
+import org.locationtech.geomesa.index.iterators.StatsScan
 import org.locationtech.geomesa.index.stats.GeoMesaStats
-import org.locationtech.geomesa.index.utils.KryoLazyStatsUtils
 import org.locationtech.geomesa.utils.collection.CloseableIterator
 import org.locationtech.geomesa.utils.geotools.RichAttributeDescriptors.RichAttributeDescriptor
-import org.locationtech.geomesa.utils.index.{IndexMode, VisibilityLevel}
+import org.locationtech.geomesa.utils.index.{ByteArrays, IndexMode, VisibilityLevel}
 import org.locationtech.geomesa.utils.stats.IndexCoverage.IndexCoverage
 import org.locationtech.geomesa.utils.stats.{Cardinality, IndexCoverage, Stat}
 import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
@@ -40,14 +41,17 @@ import org.opengis.filter.Filter
 import scala.util.Try
 
 case object AttributeIndex extends AccumuloAttributeIndex {
-  override val version: Int = 6
+  override val version: Int = 7
 }
 
 // secondary z-index
 trait AccumuloAttributeIndex extends AccumuloFeatureIndex with AccumuloIndexAdapter
     with AttributeIndex[AccumuloDataStore, AccumuloFeature, Mutation, Range, ScanConfig] with AttributeSplittable {
 
+  import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
+
   import scala.collection.JavaConversions._
+  import scala.collection.JavaConverters._
 
   type ScanConfigFn = (SimpleFeatureType, Option[Filter], Option[(String, SimpleFeatureType)]) => ScanConfig
 
@@ -60,45 +64,105 @@ trait AccumuloAttributeIndex extends AccumuloFeatureIndex with AccumuloIndexAdap
     override def initialValue: Boolean = true
   }
 
-  override def configureSplits(sft: SimpleFeatureType, ds: AccumuloDataStore): Unit = {
-    import scala.collection.JavaConversions._
-    val table = getTableName(sft.getTypeName, ds)
-    val splits = getSplits(sft).map(new Text(_)).toSet -- ds.tableOps.listSplits(table)
-    if (splits.nonEmpty) {
-      ds.tableOps.addSplits(table, ImmutableSortedSet.copyOf(splits.toArray))
+  override def configureSplits(sft: SimpleFeatureType, ds: AccumuloDataStore, partition: Option[String]): Unit = {
+    val target = getSplits(sft, partition).map(new Text(_)).toSet
+    getTableNames(sft, ds, partition).foreach { table =>
+      val splits = target -- ds.tableOps.listSplits(table)
+      if (splits.nonEmpty) {
+        ds.tableOps.addSplits(table, new java.util.TreeSet(splits.asJava))
+      }
     }
   }
 
-  override def writer(sft: SimpleFeatureType, ds: AccumuloDataStore): (AccumuloFeature) => Seq[Mutation] = {
-    val getRows = getRowKeys(sft, lenient = false)
+  override def writer(sft: SimpleFeatureType, ds: AccumuloDataStore): AccumuloFeature => Seq[Mutation] = {
+    val sharing = sft.getTableSharingBytes
+    val shards = shardStrategy(sft)
     val coverages = sft.getAttributeDescriptors.map(_.getIndexCoverage()).toArray
-    (wf) => getRows(wf).map { case (i, r) => createInsert(r, wf, coverages(i)) }
+    val toIndexKey = keySpace.toIndexKeyBytes(sft)
+    tieredKeySpace(sft) match {
+      case None       => mutator(sharing, shards, toIndexKey, coverages, createValuesInsert)
+      case Some(tier) => mutator(sharing, shards, toIndexKey, tier.toIndexKeyBytes(sft), coverages, createValuesInsert)
+    }
   }
 
-  override def remover(sft: SimpleFeatureType, ds: AccumuloDataStore): (AccumuloFeature) => Seq[Mutation] = {
-    val getRows = getRowKeys(sft, lenient = true)
+  override def remover(sft: SimpleFeatureType, ds: AccumuloDataStore): AccumuloFeature => Seq[Mutation] = {
+    val sharing = sft.getTableSharingBytes
+    val shards = shardStrategy(sft)
     val coverages = sft.getAttributeDescriptors.map(_.getIndexCoverage()).toArray
-    (wf) => getRows(wf).map { case (i, r) => createDelete(r, wf, coverages(i)) }
+    val toIndexKey = keySpace.toIndexKeyBytes(sft, lenient = true)
+    tieredKeySpace(sft) match {
+      case None       => mutator(sharing, shards, toIndexKey, coverages, createValuesDelete)
+      case Some(tier) => mutator(sharing, shards, toIndexKey, tier.toIndexKeyBytes(sft, lenient = true), coverages, createValuesDelete)
+    }
   }
 
-  protected def createInsert(row: Array[Byte], feature: AccumuloFeature, coverage: IndexCoverage): Mutation = {
+  private def createValuesInsert(row: Array[Byte], values: Seq[AccumuloFeature.RowValue]): Mutation = {
     val mutation = new Mutation(row)
-    val values = coverage match {
-      case IndexCoverage.FULL => feature.fullValues
-      case IndexCoverage.JOIN => feature.indexValues
-    }
     values.foreach(v => mutation.put(v.cf, v.cq, v.vis, v.value))
     mutation
   }
 
-  protected def createDelete(row: Array[Byte], feature: AccumuloFeature, coverage: IndexCoverage): Mutation = {
+  private def createValuesDelete(row: Array[Byte], values: Seq[AccumuloFeature.RowValue]): Mutation = {
     val mutation = new Mutation(row)
-    val values = coverage match {
-      case IndexCoverage.FULL => feature.fullValues
-      case IndexCoverage.JOIN => feature.indexValues
-    }
     values.foreach(v => mutation.putDelete(v.cf, v.cq, v.vis))
     mutation
+  }
+
+  /**
+    * Mutator for a single key space
+    *
+    * @param sharing table sharing bytes
+    * @param shards sharding
+    * @param toIndexKey function to create the primary index key
+    * @param operation operation (create or delete)
+    * @param feature feature to operate on
+    * @return
+    */
+  private def mutator(sharing: Array[Byte],
+                      shards: ShardStrategy,
+                      toIndexKey: (Seq[Array[Byte]], SimpleFeature, Array[Byte]) => Seq[Array[Byte]],
+                      coverages: Array[IndexCoverage],
+                      operation: (Array[Byte], Seq[AccumuloFeature.RowValue]) => Mutation)
+                     (feature: AccumuloFeature): Seq[Mutation] = {
+    val shard = shards(feature)
+    val iOffset = sharing.length + shard.length
+    toIndexKey(Seq(sharing, shard), feature.feature, feature.idBytes).map { row =>
+      val values = coverages(ByteArrays.readShort(row, iOffset)) match {
+        case IndexCoverage.FULL => feature.fullValues
+        case IndexCoverage.JOIN => feature.indexValues
+      }
+      operation.apply(row, values)
+    }
+  }
+
+  /**
+    * Mutator function for two key spaces
+    *
+    * @param sharing table sharing bytes
+    * @param shards sharding
+    * @param toIndexKey function to create the primary index key
+    * @param toTieredKey function to create a secondary, tiered index key
+    * @param operation operation (create or delete)
+    * @param feature feature to operate on
+    * @return
+    */
+  private def mutator(sharing: Array[Byte],
+                      shards: ShardStrategy,
+                      toIndexKey: (Seq[Array[Byte]], SimpleFeature, Array[Byte]) => Seq[Array[Byte]],
+                      toTieredKey: (Seq[Array[Byte]], SimpleFeature, Array[Byte]) => Seq[Array[Byte]],
+                      coverages: Array[IndexCoverage],
+                      operation: (Array[Byte], Seq[AccumuloFeature.RowValue]) => Mutation)
+                     (feature: AccumuloFeature): Seq[Mutation] = {
+    val shard = shards(feature)
+    val iOffset = sharing.length + shard.length
+    for (tier1 <- toIndexKey(Seq(sharing, shard), feature.feature, Array.empty);
+         row   <- toTieredKey(Seq(tier1), feature.feature, feature.idBytes)) yield {
+      val values = coverages(ByteArrays.readShort(row, iOffset)) match {
+        case IndexCoverage.FULL => feature.fullValues
+        case IndexCoverage.JOIN => feature.indexValues
+      }
+      operation.apply(row, values)
+    }
   }
 
   // we've overridden createInsert so this shouldn't be called, but it's still
@@ -141,7 +205,7 @@ trait AccumuloAttributeIndex extends AccumuloFeatureIndex with AccumuloIndexAdap
     if (config.ranges.isEmpty) { EmptyPlan(filter) } else {
       config match {
         case c: JoinScanConfig => joinScanPlan(sft, ds, filter, c)
-        case c => super.scanPlan(sft, ds, filter, config)
+        case _ => super.scanPlan(sft, ds, filter, config)
       }
     }
   }
@@ -157,7 +221,7 @@ trait AccumuloAttributeIndex extends AccumuloFeatureIndex with AccumuloIndexAdap
     }
     val attributes = FilterHelper.propertyNames(primary, sft)
     // ensure we only have 1 prop we're working on
-    if (attributes.length != 1) {
+    if (attributes.lengthCompare(1) != 0) {
       throw new IllegalStateException(s"Expected one attribute in filter, got: ${attributes.mkString(", ")}")
     }
 
@@ -182,7 +246,7 @@ trait AccumuloAttributeIndex extends AccumuloFeatureIndex with AccumuloIndexAdap
     import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 
     val dedupe = hasDuplicates(sft, filter.primary)
-    val cf = AccumuloFeatureIndex.IndexColumnFamily
+    val cf = AccumuloColumnGroups.IndexColumnFamily
 
     val indexSft = IndexValueEncoder.getIndexSft(sft)
     val transform = hints.getTransformSchema
@@ -318,7 +382,6 @@ trait AccumuloAttributeIndex extends AccumuloFeatureIndex with AccumuloIndexAdap
                         hints: Hints,
                         hasDupes: Boolean,
                         attributePlan: ScanConfigFn): JoinScanConfig = {
-    import AccumuloFeatureIndex.{AttributeColumnFamily, FullColumnFamily}
     import org.locationtech.geomesa.filter.ff
     import org.locationtech.geomesa.index.conf.QueryHints.RichHints
     import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
@@ -334,35 +397,46 @@ trait AccumuloAttributeIndex extends AccumuloFeatureIndex with AccumuloIndexAdap
     val attributeScan = attributePlan(indexSft, stFilter, None)
 
     // apply any secondary filters or transforms against the record table
-    val recordIndex = AccumuloFeatureIndex.indices(sft, IndexMode.Read).find(_.name == RecordIndex.name).getOrElse {
-      throw new RuntimeException("Record index does not exist for join query")
+    val recordIndex = {
+      val indices = AccumuloFeatureIndex.indices(sft, mode = IndexMode.Read)
+      indices.find(AccumuloFeatureIndex.RecordIndices.contains).getOrElse {
+        throw new RuntimeException("Record index does not exist for join query")
+      }
     }
+
+    val isAttributeLevelVis = sft.getVisibilityLevel == VisibilityLevel.Attribute
+
+    val (recordColFamily, recordSchema) = hints.getTransformDefinition match {
+      case _  if isAttributeLevelVis => (AccumuloColumnGroups.AttributeColumnFamily, sft)
+      case Some(tdefs)               =>  AccumuloColumnGroups.group(sft, tdefs, ecql)
+      case None                      => (AccumuloColumnGroups.default, sft)
+    }
+
     val (recordIter, reduce, kvsToFeatures) = if (hints.isArrowQuery) {
-      val (iter, reduce) = ArrowIterator.configure(sft, recordIndex, ds.stats, filter.filter, ecqlFilter, hints, deduplicate = false)
+      val (iter, reduce) = ArrowIterator.configure(recordSchema, recordIndex, ds.stats, filter.filter, ecqlFilter, hints, deduplicate = false)
       (Seq(iter), Some(reduce), ArrowIterator.kvsToFeatures())
     } else if (hints.isStatsQuery) {
-      val iter = KryoLazyStatsIterator.configure(sft, recordIndex, ecqlFilter, hints, deduplicate = false)
-      val reduce = KryoLazyStatsUtils.reduceFeatures(sft, hints)(_)
+      val iter = KryoLazyStatsIterator.configure(recordSchema, recordIndex, ecqlFilter, hints, deduplicate = false)
+      val reduce = StatsScan.reduceFeatures(recordSchema, hints)(_)
       (Seq(iter), Some(reduce), KryoLazyStatsIterator.kvsToFeatures())
     } else if (hints.isDensityQuery) {
-      val iter = KryoLazyDensityIterator.configure(sft, recordIndex, ecqlFilter, hints, deduplicate = false)
+      val iter = KryoLazyDensityIterator.configure(recordSchema, recordIndex, ecqlFilter, hints, deduplicate = false)
       (Seq(iter), None, KryoLazyDensityIterator.kvsToFeatures())
     } else if (hints.isBinQuery) {
       // aggregating iterator wouldn't be very effective since each range is a single row
-      val iter = KryoLazyFilterTransformIterator.configure(sft, recordIndex, ecqlFilter, hints).toSeq
-      val kvsToFeatures = BinAggregatingIterator.nonAggregatedKvsToFeatures(sft, recordIndex, hints, SerializationType.KRYO)
+      val iter = KryoLazyFilterTransformIterator.configure(recordSchema, recordIndex, ecqlFilter, hints).toSeq
+      val kvsToFeatures = BinAggregatingIterator.nonAggregatedKvsToFeatures(recordSchema, recordIndex, hints, SerializationType.KRYO)
       (iter, None, kvsToFeatures)
     } else {
-      val iter = KryoLazyFilterTransformIterator.configure(sft, recordIndex, ecqlFilter, hints).toSeq
-      (iter, None, recordIndex.entriesToFeatures(sft, hints.getReturnSft))
+      val iter = KryoLazyFilterTransformIterator.configure(recordSchema, recordIndex, ecqlFilter, hints).toSeq
+      (iter, None, recordIndex.entriesToFeatures(recordSchema, hints.getReturnSft))
     }
-    val (visibilityIter, recordCf) = sft.getVisibilityLevel match {
-      case VisibilityLevel.Feature   => (Seq.empty, FullColumnFamily)
-      case VisibilityLevel.Attribute => (Seq(KryoVisibilityRowEncoder.configure(sft)), AttributeColumnFamily)
-    }
-    val recordIterators = visibilityIter ++ recordIter
 
-    new JoinScanConfig(recordIndex, recordIterators, recordCf, attributeScan.ranges, attributeScan.columnFamily,
+    val recordIterators = if (!isAttributeLevelVis) { recordIter } else {
+      Seq(KryoVisibilityRowEncoder.configure(recordSchema)) ++ recordIter
+    }
+
+    new JoinScanConfig(recordIndex, recordIterators, recordColFamily, attributeScan.ranges, attributeScan.columnFamily,
       attributeScan.iterators, kvsToFeatures, reduce, hasDupes)
   }
 
@@ -372,24 +446,41 @@ trait AccumuloAttributeIndex extends AccumuloFeatureIndex with AccumuloIndexAdap
                            config: JoinScanConfig): QueryPlan[AccumuloDataStore, AccumuloFeature, Mutation] = {
     import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 
-    val table = getTableName(sft.getTypeName, ds)
-    val recordTable = config.recordIndex.getTableName(sft.getTypeName, ds)
+    val (tables, recordTables) = TablePartition(ds, sft) match {
+      case None => (getTableNames(sft, ds, None), config.recordIndex.getTableNames(sft, ds, None))
+      case Some(tp) =>
+        val partitions = filter.filter.map(tp.partitions).getOrElse(Seq.empty)
+        if (partitions.nonEmpty) {
+          partitions.flatMap { p =>
+            for {
+              t <- getTableNames(sft, ds, Some(p))
+              r <- config.recordIndex.getTableNames(sft, ds, Some(p))
+            } yield {
+              (t, r)
+            }
+          }.unzip
+        } else {
+          (getTableNames(sft, ds, None), config.recordIndex.getTableNames(sft, ds, None))
+        }
+    }
+
     val recordThreads = ds.config.recordThreads
 
     // function to join the attribute index scan results to the record table
     // have to pull the feature id from the row
-    val prefix = sft.getTableSharingPrefix
+    val prefix = sft.getTableSharingBytes
     val getId = getIdFromRow(sft)
-    val joinFunction: JoinFunction = (kv) => {
+    val getRowKey = RecordIndex.getRowKey(sft)
+    val joinFunction: JoinFunction = kv => {
       val row = kv.getKey.getRow
-      new Range(RecordIndex.getRowKey(prefix, getId(row.getBytes, 0, row.getLength)))
+      new Range(new Text(getRowKey(prefix, getId(row.getBytes, 0, row.getLength, null))))
     }
 
     val recordRanges = Seq.empty // this will get overwritten in the join method
-    val joinQuery = BatchScanPlan(filter, recordTable, recordRanges, config.recordIterators,
+    val joinQuery = BatchScanPlan(filter, recordTables, recordRanges, config.recordIterators,
       Seq(config.recordColumnFamily), config.entriesToFeatures, config.reduce, recordThreads, hasDuplicates = false)
 
-    JoinPlan(filter, table, config.ranges, config.iterators,
+    JoinPlan(filter, tables, config.ranges, config.iterators,
       Seq(config.columnFamily), recordThreads, config.duplicates, joinFunction, joinQuery)
   }
 
@@ -425,12 +516,18 @@ trait AccumuloAttributeIndex extends AccumuloFeatureIndex with AccumuloIndexAdap
     * full index range query:
     *   high cardinality - 100
     *   unknown cardinality - 1010
+    * full index not null query:
+    *   high cardinality - 500
+    *   unknown cardinality - 5050
     * join index equals query:
     *   high cardinality - 100
     *   unknown cardinality - 1010
     * join index range query:
     *   high cardinality - 1000
     *   unknown cardinality - 10100
+    * join index not null query:
+    *   high cardinality - 5000
+    *   unknown cardinality - 50500
     *
     * Compare with id lookups at 1, z2/z3 at 200-401
     */
@@ -447,23 +544,24 @@ trait AccumuloAttributeIndex extends AccumuloFeatureIndex with AccumuloIndexAdap
       if bounds.nonEmpty
     } yield {
       if (bounds.disjoint) { 0L } else {
-        // scale attribute cost by expected cardinality
+        // high cardinality attributes and equality queries are prioritized
+        // joins and not-null queries are de-prioritized
+
         val baseCost = descriptor.getCardinality() match {
           case Cardinality.HIGH    => 10
           case Cardinality.UNKNOWN => 101
           case Cardinality.LOW     => 1000
         }
-        // range queries don't allow us to use our secondary z-index
         val secondaryIndexMultiplier = {
-          val isEqualsQuery = bounds.precise && !bounds.exists(_.isRange)
-          if (isEqualsQuery) { 1 } else { 10 }
+          if (!bounds.forall(_.isBounded)) { 50 } // not null
+          else if (bounds.precise && !bounds.exists(_.isRange)) { 1 } // equals
+          else { 10 } // range
         }
-        // join queries are much more expensive than non-join queries
         val joinMultiplier = {
-          val isJoin = descriptor.getIndexCoverage == IndexCoverage.FULL ||
+          val notJoin = descriptor.getIndexCoverage == IndexCoverage.FULL ||
             IteratorTrigger.canUseAttrIdxValues(sft, filter.secondary, transform) ||
             IteratorTrigger.canUseAttrKeysPlusValues(attribute, sft, filter.secondary, transform)
-          if (isJoin) { 1 } else { 10 + (bounds.values.length - 1) }
+          if (notJoin) { 1 } else { 10 + (bounds.values.length - 1) }
         }
 
         baseCost * secondaryIndexMultiplier * joinMultiplier
@@ -507,17 +605,17 @@ object AccumuloAttributeIndex {
   def reduceAttributeStats(sft: SimpleFeatureType,
                            indexSft: SimpleFeatureType,
                            transform: Option[SimpleFeatureType],
-                           hints: Hints): (CloseableIterator[SimpleFeature]) => CloseableIterator[SimpleFeature] = {
+                           hints: Hints): CloseableIterator[SimpleFeature] => CloseableIterator[SimpleFeature] = {
     import org.locationtech.geomesa.index.conf.QueryHints.RichHints
     if (transform.isDefined || !hints.isStatsEncode) {
       // returned stats will be in the transform schema or in json
-      KryoLazyStatsUtils.reduceFeatures(indexSft, hints)(_)
+      StatsScan.reduceFeatures(indexSft, hints)(_)
     } else {
       // we have to transform back into the original sft after operating on the index values
-      val decode = KryoLazyStatsUtils.decodeStat(indexSft)
-      val encode = KryoLazyStatsUtils.encodeStat(sft)
-      (iter) => {
-        KryoLazyStatsUtils.reduceFeatures(indexSft, hints)(iter).map { feature =>
+      val decode = StatsScan.decodeStat(indexSft)
+      val encode = StatsScan.encodeStat(sft)
+      iter => {
+        StatsScan.reduceFeatures(indexSft, hints)(iter).map { feature =>
           // we can create a new stat with the correct sft, then add the result
           // this should set the correct metadata but preserve the underlying data
           val stat = Stat(sft, hints.getStatsQuery)
@@ -530,7 +628,7 @@ object AccumuloAttributeIndex {
   }
 
   trait AttributeSplittable {
-    def configureSplits(sft: SimpleFeatureType, ds: AccumuloDataStore): Unit
+    def configureSplits(sft: SimpleFeatureType, ds: AccumuloDataStore, partition: Option[String]): Unit
   }
 
   class JoinScanConfig(val recordIndex: AccumuloFeatureIndex,
@@ -539,8 +637,8 @@ object AccumuloAttributeIndex {
                        ranges: Seq[Range],
                        columnFamily: Text,
                        iterators: Seq[IteratorSetting],
-                       entriesToFeatures: (Entry[Key, Value]) => SimpleFeature,
-                       reduce: Option[(CloseableIterator[SimpleFeature]) => CloseableIterator[SimpleFeature]],
+                       entriesToFeatures: Entry[Key, Value] => SimpleFeature,
+                       reduce: Option[CloseableIterator[SimpleFeature] => CloseableIterator[SimpleFeature]],
                        duplicates: Boolean)
       extends ScanConfig(ranges, columnFamily, iterators, entriesToFeatures, reduce, duplicates)
 }

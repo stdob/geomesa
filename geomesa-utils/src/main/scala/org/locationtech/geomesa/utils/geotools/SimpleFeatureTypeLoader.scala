@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -66,7 +66,7 @@ object ConfigSftParsing {
   val ConfigPathProperty = SystemProperty("org.locationtech.geomesa.sft.config.path", "geomesa.sfts")
 
   // keep as function so its mutable
-  def path = ConfigPathProperty.get
+  def path: String = ConfigPathProperty.get
 }
 
 class ClassPathSftProvider extends SimpleFeatureTypeProvider with ConfigSftParsing {
@@ -82,11 +82,19 @@ class URLSftProvider extends SimpleFeatureTypeProvider with ConfigSftParsing {
   override def loadTypes(): JList[SimpleFeatureType] = {
     val urls = configURLs.toList
     logger.debug(s"Loading config from urls: ${urls.mkString(", ")}")
-    urls
-      .map(ConfigFactory.parseURL)
-      .reduceLeftOption(_.withFallback(_))
-      .map(parseConf)
-      .getOrElse(List.empty[SimpleFeatureType])
+    urls.flatMap { url =>
+      logger.debug(s"Attempting to parse config from url $url")
+      try {
+        Some(ConfigFactory.parseURL(url))
+      } catch {
+        case e: Throwable =>
+          logger.warn(s"Unable to load SFT config from url $url")
+          logger.trace(s"Unable to load SFT config from url $url", e)
+          None
+      }
+    }.reduceLeftOption(_.withFallback(_))
+    .map(parseConf)
+    .getOrElse(List.empty[SimpleFeatureType])
   }
   
   // Will also pick things up from the SystemProperties

@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -17,9 +17,11 @@ import org.locationtech.geomesa.features.SimpleFeatureSerializer
 import org.locationtech.geomesa.features.kryo.KryoFeatureSerializer.{NON_NULL_BYTE, NULL_BYTE, VERSION}
 import org.locationtech.geomesa.features.kryo.json.KryoJsonSerialization
 import org.locationtech.geomesa.features.kryo.serialization.{KryoGeometrySerialization, KryoUserDataSerialization}
-import org.locationtech.geomesa.features.serialization.ObjectType
 import org.locationtech.geomesa.features.serialization.ObjectType.ObjectType
+import org.locationtech.geomesa.features.serialization.{ObjectType, TwkbSerialization}
 import org.locationtech.geomesa.utils.cache.{CacheKeyGenerator, SoftThreadLocal, SoftThreadLocalCache}
+import org.locationtech.geomesa.utils.geometry.GeometryPrecision
+import org.opengis.feature.`type`.AttributeDescriptor
 import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 
 trait KryoFeatureSerialization extends SimpleFeatureSerializer {
@@ -96,16 +98,17 @@ object KryoFeatureSerialization {
     offsets.getOrElseUpdate(sft, Array.ofDim[Int](size))
 
   // noinspection UnitInMap
-  def getWriters(key: String, sft: SimpleFeatureType): Array[(Output, AnyRef) => Unit] = {
+  private [geomesa] def getWriters(key: String, sft: SimpleFeatureType): Array[(Output, AnyRef) => Unit] = {
     import scala.collection.JavaConversions._
     writers.getOrElseUpdate(key, sft.getAttributeDescriptors.map { ad =>
-      val (otype, bindings) = ObjectType.selectType(ad.getType.getBinding, ad.getUserData)
-      matchWriter(otype, bindings)
+      val bindings = ObjectType.selectType(ad.getType.getBinding, ad.getUserData)
+      matchWriter(bindings, ad)
     }.toArray)
   }
 
-  private def matchWriter(otype: ObjectType, bindings: Seq[ObjectType] = Seq.empty): (Output, AnyRef) => Unit = {
-    otype match {
+  private [geomesa] def matchWriter(bindings: Seq[ObjectType], descriptor: AttributeDescriptor): (Output, AnyRef) => Unit = {
+    import org.locationtech.geomesa.utils.geotools.RichAttributeDescriptors.RichAttributeDescriptor
+    bindings.head match {
       case ObjectType.STRING =>
         (o: Output, v: AnyRef) => o.writeString(v.asInstanceOf[String]) // write string supports nulls
       case ObjectType.INT =>
@@ -135,11 +138,16 @@ object KryoFeatureSerialization {
         writeNullable(w)
       case ObjectType.GEOMETRY =>
         // null checks are handled by geometry serializer
-        (o: Output, v: AnyRef) => KryoGeometrySerialization.serialize(o, v.asInstanceOf[Geometry])
+        descriptor.getPrecision match {
+          case GeometryPrecision.FullPrecision =>
+            (o: Output, v: AnyRef) => KryoGeometrySerialization.serializeWkb(o, v.asInstanceOf[Geometry])
+          case precision: GeometryPrecision.TwkbPrecision =>
+            (o: Output, v: AnyRef) => KryoGeometrySerialization.serialize(o, v.asInstanceOf[Geometry], precision)
+        }
       case ObjectType.JSON =>
         (o: Output, v: AnyRef) => KryoJsonSerialization.serialize(o, v.asInstanceOf[String])
       case ObjectType.LIST =>
-        val valueWriter = matchWriter(bindings.head)
+        val valueWriter = matchWriter(bindings.drop(1), descriptor)
         (o: Output, v: AnyRef) => {
           val list = v.asInstanceOf[java.util.List[AnyRef]]
           if (list == null) {
@@ -153,8 +161,8 @@ object KryoFeatureSerialization {
           }
         }
       case ObjectType.MAP =>
-        val keyWriter = matchWriter(bindings.head)
-        val valueWriter = matchWriter(bindings(1))
+        val keyWriter = matchWriter(bindings.slice(1, 2), descriptor)
+        val valueWriter = matchWriter(bindings.drop(2), descriptor)
         (o: Output, v: AnyRef) => {
           val map = v.asInstanceOf[java.util.Map[AnyRef, AnyRef]]
           if (map == null) {

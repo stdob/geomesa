@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -89,7 +89,7 @@ class TopKTest extends Specification {
 
         unpacked must beAnInstanceOf[TopK[String]]
         unpacked.asInstanceOf[TopK[String]].size mustEqual stat.size
-        unpacked.asInstanceOf[TopK[String]].attribute mustEqual stat.attribute
+        unpacked.asInstanceOf[TopK[String]].property mustEqual stat.property
         unpacked.asInstanceOf[TopK[String]].toJson mustEqual stat.toJson
         unpacked.isEquivalent(stat) must beTrue
       }
@@ -101,7 +101,7 @@ class TopKTest extends Specification {
 
         unpacked must beAnInstanceOf[TopK[String]]
         unpacked.asInstanceOf[TopK[String]].size mustEqual stat.size
-        unpacked.asInstanceOf[TopK[String]].attribute mustEqual stat.attribute
+        unpacked.asInstanceOf[TopK[String]].property mustEqual stat.property
         unpacked.asInstanceOf[TopK[String]].toJson mustEqual stat.toJson
         unpacked.isEquivalent(stat) must beTrue
       }
@@ -114,7 +114,7 @@ class TopKTest extends Specification {
 
         unpacked must beAnInstanceOf[TopK[String]]
         unpacked.asInstanceOf[TopK[String]].size mustEqual stat.size
-        unpacked.asInstanceOf[TopK[String]].attribute mustEqual stat.attribute
+        unpacked.asInstanceOf[TopK[String]].property mustEqual stat.property
         unpacked.asInstanceOf[TopK[String]].toJson mustEqual stat.toJson
         unpacked.isEquivalent(stat) must beTrue
 
@@ -173,7 +173,7 @@ class TopKTest extends Specification {
 
         unpacked must beAnInstanceOf[TopK[String]]
         unpacked.asInstanceOf[TopK[String]].size mustEqual stat.size
-        unpacked.asInstanceOf[TopK[String]].attribute mustEqual stat.attribute
+        unpacked.asInstanceOf[TopK[String]].property mustEqual stat.property
         unpacked.asInstanceOf[TopK[String]].toJson mustEqual stat.toJson
         unpacked.isEquivalent(stat) must beTrue
       }
@@ -196,7 +196,7 @@ class TopKTest extends Specification {
 
         unpacked must beAnInstanceOf[TopK[String]]
         unpacked.asInstanceOf[TopK[String]].size mustEqual stat.size
-        unpacked.asInstanceOf[TopK[String]].attribute mustEqual stat.attribute
+        unpacked.asInstanceOf[TopK[String]].property mustEqual stat.property
         unpacked.asInstanceOf[TopK[String]].toJson mustEqual stat.toJson
         unpacked.isEquivalent(stat) must beTrue
       }
@@ -222,7 +222,7 @@ class TopKTest extends Specification {
 
         unpacked must beAnInstanceOf[TopK[String]]
         unpacked.asInstanceOf[TopK[String]].size mustEqual stat.size
-        unpacked.asInstanceOf[TopK[String]].attribute mustEqual stat.attribute
+        unpacked.asInstanceOf[TopK[String]].property mustEqual stat.property
         unpacked.asInstanceOf[TopK[String]].toJson mustEqual stat.toJson
         unpacked.isEquivalent(stat) must beTrue
       }
@@ -248,7 +248,7 @@ class TopKTest extends Specification {
 
         unpacked must beAnInstanceOf[TopK[String]]
         unpacked.asInstanceOf[TopK[String]].size mustEqual stat.size
-        unpacked.asInstanceOf[TopK[String]].attribute mustEqual stat.attribute
+        unpacked.asInstanceOf[TopK[String]].property mustEqual stat.property
         unpacked.asInstanceOf[TopK[String]].toJson mustEqual stat.toJson
         unpacked.isEquivalent(stat) must beTrue
       }

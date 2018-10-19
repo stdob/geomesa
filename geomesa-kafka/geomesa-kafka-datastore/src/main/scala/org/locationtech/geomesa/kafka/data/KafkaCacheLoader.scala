@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -10,19 +10,21 @@ package org.locationtech.geomesa.kafka.data
 
 import java.io.Closeable
 import java.util.Collections
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.{ConcurrentHashMap, Executors, TimeUnit}
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.{ConcurrentHashMap, CountDownLatch, Executors}
 
 import com.typesafe.scalalogging.LazyLogging
-import org.apache.kafka.clients.consumer.Consumer
-import org.apache.kafka.common.errors.WakeupException
+import org.apache.kafka.clients.consumer.{Consumer, ConsumerRecord}
 import org.geotools.data.simple.SimpleFeatureSource
 import org.geotools.data.{FeatureEvent, FeatureListener}
+import org.locationtech.geomesa.kafka.KafkaConsumerVersions
+import org.locationtech.geomesa.kafka.consumer.ThreadedConsumer
+import org.locationtech.geomesa.kafka.data.KafkaDataStore.IndexConfig
 import org.locationtech.geomesa.kafka.index.KafkaFeatureCache
-import org.locationtech.geomesa.kafka.utils.GeoMessage.{Clear, Change, Delete}
+import org.locationtech.geomesa.kafka.utils.GeoMessage.{Change, Clear, Delete}
 import org.locationtech.geomesa.kafka.utils.{GeoMessageSerializer, KafkaFeatureEvent}
-import org.locationtech.geomesa.utils.conf.GeoMesaSystemProperties.SystemProperty
 import org.opengis.feature.simple.SimpleFeatureType
+import org.opengis.filter.Filter
 
 import scala.util.control.NonFatal
 
@@ -32,39 +34,49 @@ import scala.util.control.NonFatal
   */
 trait KafkaCacheLoader extends Closeable with LazyLogging {
 
-  private val listeners = Collections.newSetFromMap {
-    new ConcurrentHashMap[(SimpleFeatureSource, FeatureListener), java.lang.Boolean]()
+  import scala.collection.JavaConverters._
+
+  private val listeners = {
+    val map = new ConcurrentHashMap[(SimpleFeatureSource, FeatureListener), java.lang.Boolean]()
+    Collections.newSetFromMap(map).asScala
   }
+
+  // use a flag instead of checking listeners.isEmpty, which is slightly expensive for ConcurrentHashMap
+  @volatile
+  private var hasListeners = false
 
   def cache: KafkaFeatureCache
 
-  def addListener(source: SimpleFeatureSource, listener: FeatureListener): Unit =
+  def addListener(source: SimpleFeatureSource, listener: FeatureListener): Unit = synchronized {
     listeners.add((source, listener))
+    hasListeners = true
+  }
 
-  def removeListener(source: SimpleFeatureSource, listener: FeatureListener): Unit =
+  def removeListener(source: SimpleFeatureSource, listener: FeatureListener): Unit = synchronized {
     listeners.remove((source, listener))
+    hasListeners = listeners.nonEmpty
+  }
 
-  protected def fireEvent(message: Change): Unit = {
-    if (!listeners.isEmpty) {
-      fireEvent(KafkaFeatureEvent.changed(_, message.feature, message.timestamp.getMillis))
+  protected [KafkaCacheLoader] def fireEvent(message: Change, timestamp: Long): Unit = {
+    if (hasListeners) {
+      fireEvent(KafkaFeatureEvent.changed(_, message.feature, timestamp))
     }
   }
 
-  protected def fireEvent(message: Delete): Unit = {
-    if (!listeners.isEmpty) {
+  protected [KafkaCacheLoader] def fireEvent(message: Delete, timestamp: Long): Unit = {
+    if (hasListeners) {
       val removed = cache.query(message.id).orNull
-      fireEvent(KafkaFeatureEvent.removed(_, message.id, removed, message.timestamp.getMillis))
+      fireEvent(KafkaFeatureEvent.removed(_, message.id, removed, timestamp))
     }
   }
 
-  protected def fireEvent(message: Clear): Unit = {
-    if (!listeners.isEmpty) {
-      fireEvent(KafkaFeatureEvent.cleared(_, message.timestamp.getMillis))
+  protected [KafkaCacheLoader] def fireEvent(message: Clear, timestamp: Long): Unit = {
+    if (hasListeners) {
+      fireEvent(KafkaFeatureEvent.cleared(_, timestamp))
     }
   }
 
-  private def fireEvent(toEvent: (SimpleFeatureSource) => FeatureEvent): Unit = {
-    import scala.collection.JavaConversions._
+  private def fireEvent(toEvent: SimpleFeatureSource => FeatureEvent): Unit = {
     val events = scala.collection.mutable.Map.empty[SimpleFeatureSource, FeatureEvent]
     listeners.foreach { case (source, listener) =>
       val event = events.getOrElseUpdate(source, toEvent(source))
@@ -85,77 +97,141 @@ object KafkaCacheLoader {
   }
 
   class KafkaCacheLoaderImpl(sft: SimpleFeatureType,
-                             val cache: KafkaFeatureCache,
-                             consumers: Seq[Consumer[Array[Byte], Array[Byte]]])
-      extends KafkaCacheLoader with LazyLogging {
+                             override val cache: KafkaFeatureCache,
+                             override protected val consumers: Seq[Consumer[Array[Byte], Array[Byte]]],
+                             override protected val topic: String,
+                             override protected val frequency: Long,
+                             lazyDeserialization: Boolean,
+                             initialLoadConfig: Option[IndexConfig]) extends ThreadedConsumer with KafkaCacheLoader {
 
-    private val running = new AtomicInteger(0)
+    private val serializer = new GeoMessageSerializer(sft, lazyDeserialization)
 
-    private val serializer = new GeoMessageSerializer(sft)
-
-    private val topic = KafkaDataStore.topic(sft)
-    private val frequency = SystemProperty("geomesa.kafka.load.interval").toDuration.map(_.toMillis).getOrElse(100L)
-
-    private val executor = Executors.newScheduledThreadPool(consumers.length)
-
-    private val schedules = consumers.zipWithIndex.map { case (c, i) =>
-      executor.scheduleWithFixedDelay(new ConsumerRunnable(c, i), frequency, frequency, TimeUnit.MILLISECONDS)
+    try { classOf[ConsumerRecord[Any, Any]].getMethod("timestamp") } catch {
+      case _: NoSuchMethodException => logger.warn("This version of Kafka doesn't support timestamps, using system time")
     }
 
-    logger.debug(s"Started ${consumers.length} consumer(s) on topic $topic")
+    initialLoadConfig match {
+      case None => startConsumers()
+      case Some(config) =>
+        // for the initial load, don't bother spatially indexing until we have the final state
+        val executor = Executors.newSingleThreadExecutor()
+        executor.submit(new InitialLoader(sft, consumers, topic, frequency, serializer, config, this))
+        executor.shutdown()
+    }
 
     override def close(): Unit = {
-      consumers.foreach(_.wakeup())
-      schedules.foreach(_.cancel(true))
-      executor.shutdownNow()
-      // ensure run has finished so that we don't get ConcurrentAccessExceptions closing the consumer
-      while (running.get > 0) {
-        Thread.sleep(10)
+      try {
+        super.close()
+      } finally {
+        cache.close()
       }
-      consumers.foreach(_.close())
-      cache.close()
-      executor.awaitTermination(1, TimeUnit.SECONDS)
     }
 
-    class ConsumerRunnable(val consumer: Consumer[Array[Byte], Array[Byte]], i: Int) extends Runnable {
+    override protected [KafkaCacheLoader] def consume(record: ConsumerRecord[Array[Byte], Array[Byte]]): Unit = {
+      val message = serializer.deserialize(record.key(), record.value())
+      val timestamp = try { record.timestamp() } catch { case _: NoSuchMethodError => System.currentTimeMillis() }
+      logger.trace(s"Consumed message [$topic:${record.partition}:${record.offset}] $message")
+      message match {
+        case m: Change => fireEvent(m, timestamp); cache.put(m.feature)
+        case m: Delete => fireEvent(m, timestamp); cache.remove(m.id)
+        case m: Clear  => fireEvent(m, timestamp); cache.clear()
+        case m => throw new IllegalArgumentException(s"Unknown message: $m")
+      }
+    }
+  }
 
-      private var errorCount = 0
+  /**
+    * Handles initial loaded 'from-beginning' without indexing features in the spatial index. Will still
+    * trigger message events.
+    *
+    * @param consumers consumers, won't be closed even on call to 'close()'
+    * @param topic kafka topic
+    * @param frequency polling frequency in milliseconds
+    * @param serializer message serializer
+    * @param toLoad main cache loader, used for callback when bulk loading is done
+    */
+  private class InitialLoader(sft: SimpleFeatureType,
+                              override protected val consumers: Seq[Consumer[Array[Byte], Array[Byte]]],
+                              override protected val topic: String,
+                              override protected val frequency: Long,
+                              serializer: GeoMessageSerializer,
+                              config: IndexConfig,
+                              toLoad: KafkaCacheLoaderImpl) extends ThreadedConsumer with Runnable {
 
-      override def run(): Unit = {
-        running.getAndIncrement()
-        try {
-          val result = consumer.poll(0)
-          logger.trace(s"Consumer poll received ${result.count()} records from topic $topic")
-          val records = result.iterator
-          while (records.hasNext) {
-            val record = records.next()
-            errorCount = 0 // reset error count
-            val message = serializer.deserialize(record.key, record.value)
-            logger.debug(s"Consumed message [$topic:${record.partition}:${record.offset}] $message")
-            message match {
-              case m: Change => fireEvent(m); cache.put(m.feature)
-              case m: Delete => fireEvent(m); cache.remove(m.id)
-              case m: Clear  => fireEvent(m); cache.clear()
-              case m => throw new IllegalArgumentException(s"Unknown message: $m")
-            }
-          }
-          logger.trace(s"Consumer finished processing ${result.count()} records from topic $topic")
-          // we commit the offsets so that the next poll doesn't return the same records
-          consumer.commitSync()
-          logger.trace(s"Consumer committed offsets")
-        } catch {
-          case _: WakeupException | _: InterruptedException => // ignore
-          case NonFatal(e) =>
-            logger.warn(s"Error receiving message from topic $topic:", e)
-            errorCount += 1
-            if (errorCount < 300) { Thread.sleep(1000) } else {
-              logger.error("Shutting down due to too many errors")
-              schedules(i).cancel(false)
-            }
-        } finally {
-          running.decrementAndGet()
+    private val cache = KafkaFeatureCache.nonIndexing(sft, config.eventTime)
+
+    // track the offsets that we want to read to
+    private val offsets = new ConcurrentHashMap[Int, Long]()
+    private var latch: CountDownLatch = _
+    private val done = new AtomicBoolean(false)
+
+    override protected def closeConsumers: Boolean = false
+
+    override protected def consume(record: ConsumerRecord[Array[Byte], Array[Byte]]): Unit = {
+      if (done.get) { toLoad.consume(record) } else {
+        val message = serializer.deserialize(record.key, record.value)
+        val timestamp = try { record.timestamp() } catch { case _: NoSuchMethodError => System.currentTimeMillis() }
+        logger.trace(s"Consumed message [$topic:${record.partition}:${record.offset}] $message")
+        message match {
+          case m: Change => toLoad.fireEvent(m, timestamp); cache.put(m.feature)
+          case m: Delete => toLoad.fireEvent(m, timestamp); cache.remove(m.id)
+          case m: Clear  => toLoad.fireEvent(m, timestamp); cache.clear()
+          case m => throw new IllegalArgumentException(s"Unknown message: $m")
+        }
+        // once we've hit the max offset for the partition, remove from the offset map to indicate we're done
+        val maxOffset = offsets.getOrDefault(record.partition, Long.MaxValue)
+        if (maxOffset <= record.offset) {
+          offsets.remove(record.partition)
+          latch.countDown()
+          logger.info(s"Initial load: consumed [$topic:${record.partition}:${record.offset}] of $maxOffset, " +
+              s"${latch.getCount} partitions remaining")
+        } else if (record.offset % 1048576 == 0) { // magic number 2^20
+          logger.info(s"Initial load: consumed [$topic:${record.partition}:${record.offset}] of $maxOffset")
         }
       }
+    }
+
+    override def run(): Unit = {
+      import scala.collection.JavaConverters._
+
+      val partitions = consumers.head.partitionsFor(topic).asScala.map(_.partition)
+      try {
+        // note: these methods are not available in kafka 0.9, which will cause it to fall back to normal loading
+        val beginningOffsets = KafkaConsumerVersions.beginningOffsets(consumers.head, topic, partitions)
+        val endOffsets = KafkaConsumerVersions.endOffsets(consumers.head, topic, partitions)
+        partitions.foreach { p =>
+          // end offsets are the *next* offset that will be returned, so subtract one to track the last offset
+          // we will actually consume
+          val endOffset = endOffsets.getOrElse(p, 0L) - 1L
+          // note: not sure if start offsets are also off by one, but at the worst we would skip bulk loading
+          // for the last message per topic
+          val beginningOffset = beginningOffsets.getOrElse(p, 0L)
+          if (beginningOffset < endOffset) {
+            offsets.put(p, endOffset)
+          }
+        }
+      } catch {
+        case e: NoSuchMethodException => logger.warn(s"Can't support initial bulk loading for current Kafka version: $e")
+      }
+      // don't bother spinning up the consumer threads if we don't need to actually bulk load anything
+      if (!offsets.isEmpty) {
+        logger.info(s"Starting initial load for [$topic] with ${offsets.size} partitions")
+        latch = new CountDownLatch(offsets.size)
+        startConsumers() // kick off the asynchronous consumer threads
+        try { latch.await() } finally {
+          // stop the consumer threads, but won't close the consumers due to `closeConsumers`
+          close()
+        }
+        // set a flag just in case the consumer threads haven't finished spinning down, so that we will
+        // pass any additional messages back to the main loader
+        done.set(true)
+        logger.info(s"Finished initial load, transferring to indexed cache for [$topic]")
+        cache.query(Filter.INCLUDE).foreach(toLoad.cache.put)
+        logger.info(s"Finished transfer for [$topic]")
+      }
+      logger.info(s"Starting normal load for [$topic]")
+      // start the normal loading
+      toLoad.startConsumers()
     }
   }
 }

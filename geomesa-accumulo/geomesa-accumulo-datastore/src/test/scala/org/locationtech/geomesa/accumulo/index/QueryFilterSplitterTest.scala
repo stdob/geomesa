@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,15 +8,13 @@
 
 package org.locationtech.geomesa.accumulo.index
 
-import org.geotools.factory.CommonFactoryFinder
 import org.geotools.filter.text.ecql.ECQL
 import org.junit.runner.RunWith
 import org.locationtech.geomesa.filter
 import org.locationtech.geomesa.filter.visitor.QueryPlanFilterVisitor
 import org.locationtech.geomesa.filter.{decomposeAnd, decomposeOr}
 import org.locationtech.geomesa.index.planning.FilterSplitter
-import org.locationtech.geomesa.utils.geotools.SftBuilder.Opts
-import org.locationtech.geomesa.utils.geotools.{SftBuilder, SimpleFeatureTypes}
+import org.locationtech.geomesa.utils.geotools.{SchemaBuilder, SimpleFeatureTypes}
 import org.locationtech.geomesa.utils.index.IndexMode
 import org.locationtech.geomesa.utils.stats.Cardinality
 import org.opengis.filter._
@@ -30,23 +28,23 @@ import scala.collection.JavaConversions._
 @RunWith(classOf[JUnitRunner])
 class QueryFilterSplitterTest extends Specification {
 
+  import org.locationtech.geomesa.filter.ff
   import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 
-  val sft = new SftBuilder()
-    .stringType("attr1")
-    .stringType("attr2", index = true)
-    .stringType("attr3")
-    .stringType("attr4")
-    .stringType("high", Opts(index = true, cardinality = Cardinality.HIGH))
-    .stringType("low", Opts(index = true, cardinality = Cardinality.LOW))
-    .date("dtg", default = true)
-    .point("geom", default = true)
+  val sft = SchemaBuilder.builder()
+    .addString("attr1")
+    .addString("attr2").withIndex()
+    .addString("attr3")
+    .addString("attr4")
+    .addString("high").withIndex(Cardinality.HIGH)
+    .addString("low").withIndex(Cardinality.LOW)
+    .addDate("dtg", default = true)
+    .addPoint("geom", default = true)
     .build("QueryFilterSplitterTest")
 
   sft.setIndices(AccumuloFeatureIndex.CurrentIndices.filter(_.supports(sft)).map(i => (i.name, i.version, IndexMode.ReadWrite)))
 
-  val ff = CommonFactoryFinder.getFilterFactory2
-  val splitter = new FilterSplitter(sft, AccumuloFeatureIndex.indices(sft, IndexMode.Any))
+  val splitter = new FilterSplitter(sft, AccumuloFeatureIndex.indices(sft))
 
   val geom                = "BBOX(geom,40,40,50,50)"
   val geom2               = "BBOX(geom,60,60,70,70)"
@@ -166,10 +164,7 @@ class QueryFilterSplitterTest extends Specification {
         options.map(_.strategies.head.index) must containTheSameElementsAs(Seq(Z2Index, Z3Index))
         val z2 = options.find(_.strategies.head.index == Z2Index).get
         compareOr(z2.strategies.head.primary, geom, geom2)
-        forall(z2.strategies.map(_.secondary))(_ must beSome)
-        z2.strategies.map(_.secondary.get) must contain(beAnInstanceOf[During], beAnInstanceOf[And])
-        z2.strategies.map(_.secondary.get).collect { case a: And => a.getChildren }.flatten must
-            contain(beAnInstanceOf[During], beAnInstanceOf[Not])
+        forall(z2.strategies.map(_.secondary))(_ must beSome(beAnInstanceOf[During]))
         val z3 = options.find(_.strategies.head.index == Z3Index).get
         compareAnd(z3.strategies.head.primary, or(geom, geom2), f(dtg))
         z3.strategies.head.secondary must beNone
@@ -468,7 +463,7 @@ class QueryFilterSplitterTest extends Specification {
         options.head.strategies.map(_.index) must
             containTheSameElementsAs(Seq(Z3Index, Z2Index, AttributeIndex))
         options.head.strategies.map(_.primary) must contain(beSome(f(geom)), beSome(f(dtg)), beSome(f(indexedAttr)))
-        options.head.strategies.map(_.secondary) must contain(beSome(not(geom)), beSome(not(geom, dtg)))
+        options.head.strategies.map(_.secondary) must contain(beSome(not(geom)), beSome(not(geom, indexedAttr)))
         options.head.strategies.map(_.secondary) must contain(beNone)
       }
     }
@@ -476,7 +471,7 @@ class QueryFilterSplitterTest extends Specification {
     "support indexed date attributes" >> {
       val sft = SimpleFeatureTypes.createType("dtgIndex", "dtg:Date:index=full,*geom:Point:srid=4326")
       sft.setIndices(AccumuloFeatureIndex.CurrentIndices.filter(_.supports(sft)).map(i => (i.name, i.version, IndexMode.ReadWrite)))
-      val splitter = new FilterSplitter(sft, AccumuloFeatureIndex.indices(sft, IndexMode.Any))
+      val splitter = new FilterSplitter(sft, AccumuloFeatureIndex.indices(sft))
       val filter = f("dtg TEQUALS 2014-01-01T12:30:00.000Z")
       val options = splitter.getQueryOptions(filter)
       options must haveLength(1)

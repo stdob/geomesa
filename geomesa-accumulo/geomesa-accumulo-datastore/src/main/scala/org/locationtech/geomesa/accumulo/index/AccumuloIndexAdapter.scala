@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -19,7 +19,7 @@ import org.locationtech.geomesa.accumulo.index.AccumuloIndexAdapter.ScanConfig
 import org.locationtech.geomesa.accumulo.iterators._
 import org.locationtech.geomesa.index.api.{FilterStrategy, QueryPlan}
 import org.locationtech.geomesa.index.index.IndexAdapter
-import org.locationtech.geomesa.index.utils.KryoLazyStatsUtils
+import org.locationtech.geomesa.index.iterators.StatsScan
 import org.locationtech.geomesa.utils.collection.CloseableIterator
 import org.locationtech.geomesa.utils.index.VisibilityLevel
 import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
@@ -53,7 +53,7 @@ trait AccumuloIndexAdapter extends IndexAdapter[AccumuloDataStore, AccumuloFeatu
     mutation
   }
 
-  override protected def range(start: Array[Byte], end: Array[Byte]): Range = {
+  override protected def createRange(start: Array[Byte], end: Array[Byte]): Range = {
     // index api defines empty start/end for open-ended range - in accumulo, it's indicated with null
     val startKey = if (start.length == 0) { null } else { new Key(new Text(start)) }
     val endKey = if (end.length == 0) { null } else { new Key(new Text(end)) }
@@ -61,17 +61,17 @@ trait AccumuloIndexAdapter extends IndexAdapter[AccumuloDataStore, AccumuloFeatu
     new Range(startKey, true, endKey, false)
   }
 
-  override protected def rangeExact(row: Array[Byte]): Range = Range.exact(new Text(row))
+  override protected def createRange(row: Array[Byte]): Range = Range.exact(new Text(row))
 
   override protected def scanPlan(sft: SimpleFeatureType,
                                   ds: AccumuloDataStore,
                                   filter: FilterStrategy[AccumuloDataStore, AccumuloFeature, Mutation],
                                   config: ScanConfig): QueryPlan[AccumuloDataStore, AccumuloFeature, Mutation] = {
     if (config.ranges.isEmpty) { EmptyPlan(filter) } else {
-      val table = getTableName(sft.getTypeName, ds)
       val numThreads = queryThreads(ds)
+      val tables = getTablesForQuery(sft, ds, filter.filter)
       val ScanConfig(ranges, cf, iters, eToF, reduce, dedupe) = config
-      BatchScanPlan(filter, table, ranges, iters, Seq(cf), eToF, reduce, numThreads, dedupe)
+      BatchScanPlan(filter, tables, ranges, iters, Seq(cf), eToF, reduce, numThreads, dedupe)
     }
   }
 
@@ -81,7 +81,6 @@ trait AccumuloIndexAdapter extends IndexAdapter[AccumuloDataStore, AccumuloFeatu
                                     ranges: Seq[Range],
                                     ecql: Option[Filter],
                                     hints: Hints): ScanConfig = {
-    import AccumuloFeatureIndex.{AttributeColumnFamily, BinColumnFamily, FullColumnFamily}
     import org.locationtech.geomesa.index.conf.QueryHints.RichHints
 
     val dedupe = hasDuplicates(sft, filter.primary)
@@ -91,36 +90,45 @@ trait AccumuloIndexAdapter extends IndexAdapter[AccumuloDataStore, AccumuloFeatu
     val isPrecomputedBins = hints.isBinQuery && hasPrecomputedBins && ecql.isEmpty &&
         BinAggregatingIterator.canUsePrecomputedBins(sft, hints)
 
+    // note: column groups aren't supported for attribute level vis
+    val isAttributeLevelVis = sft.getVisibilityLevel == VisibilityLevel.Attribute
+
+    val (colFamily, schema) = hints.getTransformDefinition match {
+      case _ if isPrecomputedBins   => (AccumuloColumnGroups.BinColumnFamily, sft)
+      case _ if isAttributeLevelVis => (AccumuloColumnGroups.AttributeColumnFamily, sft)
+      case Some(tdefs)              =>  AccumuloColumnGroups.group(sft, tdefs, ecql)
+      case None                     => (AccumuloColumnGroups.default, sft)
+    }
+
     val config = if (isPrecomputedBins) {
-      val iter = BinAggregatingIterator.configurePrecomputed(sft, this, ecql, hints, dedupe)
-      ScanConfig(ranges, BinColumnFamily, Seq(iter), BinAggregatingIterator.kvsToFeatures(), None, duplicates = false)
+      val iter = BinAggregatingIterator.configurePrecomputed(schema, this, ecql, hints, dedupe)
+      ScanConfig(ranges, colFamily, Seq(iter), BinAggregatingIterator.kvsToFeatures(), None, duplicates = false)
     } else if (hints.isBinQuery) {
-      val iter = BinAggregatingIterator.configureDynamic(sft, this, ecql, hints, dedupe)
-      ScanConfig(ranges, FullColumnFamily, Seq(iter), BinAggregatingIterator.kvsToFeatures(), None, duplicates = false)
+      val iter = BinAggregatingIterator.configureDynamic(schema, this, ecql, hints, dedupe)
+      ScanConfig(ranges, colFamily, Seq(iter), BinAggregatingIterator.kvsToFeatures(), None, duplicates = false)
     } else if (hints.isArrowQuery) {
-      val (iter, reduce) = ArrowIterator.configure(sft, this, ds.stats, filter.filter, ecql, hints, dedupe)
-      ScanConfig(ranges, FullColumnFamily, Seq(iter), ArrowIterator.kvsToFeatures(), Some(reduce), duplicates = false)
+      val (iter, reduce) = ArrowIterator.configure(schema, this, ds.stats, filter.filter, ecql, hints, dedupe)
+      ScanConfig(ranges, colFamily, Seq(iter), ArrowIterator.kvsToFeatures(), Some(reduce), duplicates = false)
     } else if (hints.isDensityQuery) {
-      val iter = KryoLazyDensityIterator.configure(sft, this, ecql, hints, dedupe)
-      ScanConfig(ranges, FullColumnFamily, Seq(iter), KryoLazyDensityIterator.kvsToFeatures(), None, duplicates = false)
+      val iter = KryoLazyDensityIterator.configure(schema, this, ecql, hints, dedupe)
+      ScanConfig(ranges, colFamily, Seq(iter), KryoLazyDensityIterator.kvsToFeatures(), None, duplicates = false)
     } else if (hints.isStatsQuery) {
-      val iter = KryoLazyStatsIterator.configure(sft, this, ecql, hints, dedupe)
-      val reduce = Some(KryoLazyStatsUtils.reduceFeatures(sft, hints)(_))
-      ScanConfig(ranges, FullColumnFamily, Seq(iter), KryoLazyStatsIterator.kvsToFeatures(), reduce, duplicates = false)
+      val iter = KryoLazyStatsIterator.configure(schema, this, ecql, hints, dedupe)
+      val reduce = Some(StatsScan.reduceFeatures(schema, hints)(_))
+      ScanConfig(ranges, colFamily, Seq(iter), KryoLazyStatsIterator.kvsToFeatures(), reduce, duplicates = false)
     } else if (hints.isMapAggregatingQuery) {
-      val iter = KryoLazyMapAggregatingIterator.configure(sft, this, ecql, hints, dedupe)
+      val iter = KryoLazyMapAggregatingIterator.configure(schema, this, ecql, hints, dedupe)
       val reduce = Some(KryoLazyMapAggregatingIterator.reduceMapAggregationFeatures(hints)(_))
-      ScanConfig(ranges, FullColumnFamily, Seq(iter), entriesToFeatures(sft, hints.getReturnSft), reduce, duplicates = false)
+      ScanConfig(ranges, colFamily, Seq(iter), entriesToFeatures(schema, hints.getReturnSft), reduce, duplicates = false)
     } else {
-      val iter = KryoLazyFilterTransformIterator.configure(sft, this, ecql, hints).toSeq
-      ScanConfig(ranges, FullColumnFamily, iter, entriesToFeatures(sft, hints.getReturnSft), None, dedupe)
+      val iter = KryoLazyFilterTransformIterator.configure(schema, this, ecql, hints).toSeq
+      ScanConfig(ranges, colFamily, iter, entriesToFeatures(schema, hints.getReturnSft), None, dedupe)
     }
 
     // note: bin col family has appropriate visibility for attribute level vis and doesn't need the extra iter
-    if (isPrecomputedBins || sft.getVisibilityLevel != VisibilityLevel.Attribute) { config } else {
-      // switch to the attribute col family and add the attribute iterator
-      val visibility = KryoVisibilityRowEncoder.configure(sft)
-      config.copy(columnFamily = AttributeColumnFamily, iterators = config.iterators :+ visibility)
+    if (isPrecomputedBins || !isAttributeLevelVis) { config } else {
+      // add the attribute iterator
+      config.copy(iterators = config.iterators :+ KryoVisibilityRowEncoder.configure(schema))
     }
   }
 }
@@ -129,7 +137,7 @@ object AccumuloIndexAdapter {
   case class ScanConfig(ranges: Seq[Range],
                         columnFamily: Text,
                         iterators: Seq[IteratorSetting],
-                        entriesToFeatures: (Entry[Key, Value]) => SimpleFeature,
-                        reduce: Option[(CloseableIterator[SimpleFeature]) => CloseableIterator[SimpleFeature]],
+                        entriesToFeatures: Entry[Key, Value] => SimpleFeature,
+                        reduce: Option[CloseableIterator[SimpleFeature] => CloseableIterator[SimpleFeature]],
                         duplicates: Boolean)
 }

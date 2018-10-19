@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -21,17 +21,19 @@ import org.apache.spark.SparkContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, Expression, GenericRowWithSchema, ScalaUDF}
+import org.apache.spark.sql.jts.JTSTypes
 import org.apache.spark.sql.sources.{Filter, _}
 import org.apache.spark.sql.types.{DataTypes, StructField, StructType, TimestampType}
 import org.apache.spark.storage.StorageLevel
+import org.geotools.data.DataUtilities.compare
 import org.geotools.data.{DataStoreFinder, Query, Transaction}
 import org.geotools.factory.{CommonFactoryFinder, Hints}
 import org.geotools.feature.simple.{SimpleFeatureBuilder, SimpleFeatureTypeBuilder}
 import org.geotools.filter.text.ecql.ECQL
 import org.locationtech.geomesa.memory.cqengine.datastore.GeoCQEngineDataStore
+import org.locationtech.geomesa.spark.jts.util.WKTUtils
 import org.locationtech.geomesa.utils.collection.SelfClosingIterator
 import org.locationtech.geomesa.utils.geotools.{SftArgResolver, SftArgs, SimpleFeatureTypes}
-import org.locationtech.geomesa.utils.text.WKTUtils
 import org.opengis.feature.`type`._
 import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 
@@ -122,11 +124,11 @@ class GeoMesaDataSource extends DataSourceRegister
           case DataTypes.LongType   => builder.add(field.name, classOf[jl.Long])
           case DataTypes.TimestampType => builder.add(field.name, classOf[java.util.Date])
 
-          case SQLTypes.PointTypeInstance => builder.add(field.name, classOf[com.vividsolutions.jts.geom.Point])
-          case SQLTypes.LineStringTypeInstance => builder.add(field.name, classOf[com.vividsolutions.jts.geom.LineString])
-          case SQLTypes.PolygonTypeInstance  => builder.add(field.name, classOf[com.vividsolutions.jts.geom.Polygon])
-          case SQLTypes.MultipolygonTypeInstance  => builder.add(field.name, classOf[com.vividsolutions.jts.geom.MultiPolygon])
-          case SQLTypes.GeometryTypeInstance => builder.add(field.name, classOf[com.vividsolutions.jts.geom.Geometry])
+          case JTSTypes.PointTypeInstance => builder.add(field.name, classOf[com.vividsolutions.jts.geom.Point])
+          case JTSTypes.LineStringTypeInstance => builder.add(field.name, classOf[com.vividsolutions.jts.geom.LineString])
+          case JTSTypes.PolygonTypeInstance  => builder.add(field.name, classOf[com.vividsolutions.jts.geom.Polygon])
+          case JTSTypes.MultipolygonTypeInstance  => builder.add(field.name, classOf[com.vividsolutions.jts.geom.MultiPolygon])
+          case JTSTypes.GeometryTypeInstance => builder.add(field.name, classOf[com.vividsolutions.jts.geom.Geometry])
         }
     }
     builder.setName(name)
@@ -144,14 +146,14 @@ class GeoMesaDataSource extends DataSourceRegister
       case t if t == classOf[jl.Long]                         => DataTypes.LongType
       case t if t == classOf[java.util.Date]                  => DataTypes.TimestampType
 
-      case t if t == classOf[com.vividsolutions.jts.geom.Point]            => SQLTypes.PointTypeInstance
-      case t if t == classOf[com.vividsolutions.jts.geom.MultiPoint]       => SQLTypes.MultiPointTypeInstance
-      case t if t == classOf[com.vividsolutions.jts.geom.LineString]       => SQLTypes.LineStringTypeInstance
-      case t if t == classOf[com.vividsolutions.jts.geom.MultiLineString]  => SQLTypes.MultiLineStringTypeInstance
-      case t if t == classOf[com.vividsolutions.jts.geom.Polygon]          => SQLTypes.PolygonTypeInstance
-      case t if t == classOf[com.vividsolutions.jts.geom.MultiPolygon]     => SQLTypes.MultipolygonTypeInstance
+      case t if t == classOf[com.vividsolutions.jts.geom.Point]            => JTSTypes.PointTypeInstance
+      case t if t == classOf[com.vividsolutions.jts.geom.MultiPoint]       => JTSTypes.MultiPointTypeInstance
+      case t if t == classOf[com.vividsolutions.jts.geom.LineString]       => JTSTypes.LineStringTypeInstance
+      case t if t == classOf[com.vividsolutions.jts.geom.MultiLineString]  => JTSTypes.MultiLineStringTypeInstance
+      case t if t == classOf[com.vividsolutions.jts.geom.Polygon]          => JTSTypes.PolygonTypeInstance
+      case t if t == classOf[com.vividsolutions.jts.geom.MultiPolygon]     => JTSTypes.MultipolygonTypeInstance
 
-      case t if      classOf[Geometry].isAssignableFrom(t)    => SQLTypes.GeometryTypeInstance
+      case t if      classOf[Geometry].isAssignableFrom(t)    => JTSTypes.GeometryTypeInstance
 
       // NB:  List and Map types are not supported.
       case _                                                  => null
@@ -175,7 +177,7 @@ class GeoMesaDataSource extends DataSourceRegister
     val schemaInDs = ds.getTypeNames.contains(newFeatureName)
 
     if (schemaInDs) {
-      if (ds.getSchema(newFeatureName) != sft.getTypes) {
+      if (compare(ds.getSchema(newFeatureName),sft) != 0) {
         throw new IllegalStateException(s"The schema of the RDD conflicts with schema:$newFeatureName in the data store")
       }
     } else {
@@ -346,17 +348,19 @@ case class GeoMesaJoinRelation(sqlContext: SQLContext,
     val rightExtractors = SparkUtils.getExtractors(rightSchema.fieldNames, rightSchema)
 
     // Extract geometry indexes and spatial function from condition expression and relation SFTs
-    val (leftIndex, rightIndex, conditionFunction) = condition match {
-      case ScalaUDF(function: ((Geometry, Geometry) => Boolean), _, children: Seq[AttributeReference], _, _) =>
-        // Because the predicate may not have parameters in the right order, we must check both
-        val leftAttr = children(0).name
-        val rightAttr = children(1).name
-        val leftIndex = leftRel.sft.indexOf(leftAttr)
-        if (leftIndex == -1) {
-          (leftRel.sft.indexOf(rightAttr), rightRel.sft.indexOf(leftAttr), function)
-        } else {
-          (leftIndex, rightRel.sft.indexOf(rightAttr), function)
-        }
+    val (leftIndex, rightIndex, conditionFunction) = {
+      val scalaUdf = condition.asInstanceOf[ScalaUDF]
+      val function = scalaUdf.function.asInstanceOf[(Geometry, Geometry) => Boolean]
+      val children = scalaUdf.children.asInstanceOf[Seq[AttributeReference]]
+      // Because the predicate may not have parameters in the right order, we must check both
+      val leftAttr = children.head.name
+      val rightAttr = children(1).name
+      val leftIndex = leftRel.sft.indexOf(leftAttr)
+      if (leftIndex == -1) {
+        (leftRel.sft.indexOf(rightAttr), rightRel.sft.indexOf(leftAttr), function)
+      } else {
+        (leftIndex, rightRel.sft.indexOf(rightAttr), function)
+      }
     }
 
     // Perform the sweepline join and build rows containing matching features
@@ -398,7 +402,7 @@ object RelationUtils extends LazyLogging {
         val sft = SimpleFeatureTypes.createType(typeName,encodedSft)
         val engineStore = RelationUtils.indexIterator(sft, indexId, indexGeom)
         val engine = engineStore.namesToEngine(typeName)
-        engine.addAll(iter.toList)
+        engine.insert(iter.toList)
         Iterator(engineStore)
     }
   }
@@ -412,7 +416,7 @@ object RelationUtils extends LazyLogging {
       val sft = SimpleFeatureTypes.createType(typeName,encodedSft)
       val engineStore = RelationUtils.indexIterator(sft, indexId, indexGeom)
       val engine = engineStore.namesToEngine(typeName)
-      engine.addAll(iter)
+      engine.insert(iter)
       engineStore
     }
   }
@@ -610,7 +614,7 @@ object RelationUtils extends LazyLogging {
     val compiledCQL = filters.flatMap(SparkUtils.sparkFilterToCQLFilter).foldLeft[org.opengis.filter.Filter](filt) { (l, r) => ff.and(l, r) }
     val requiredAttributes = requiredColumns.filterNot(_ == "__fid__")
     val rdd = GeoMesaSpark(params).rdd(
-      new Configuration(), ctx, params,
+      new Configuration(ctx.hadoopConfiguration), ctx, params,
       new Query(params(GEOMESA_SQL_FEATURE), compiledCQL, requiredAttributes))
 
     val extractors = SparkUtils.getExtractors(requiredColumns, schema)
@@ -694,12 +698,16 @@ object SparkUtils {
         val index = requiredAttributes.indexOf(col)
         val schemaIndex = schema.fieldIndex(col)
         val fieldType = schema.fields(schemaIndex).dataType
-        sf: SimpleFeature =>
-          if ( fieldType == TimestampType ) {
-            new Timestamp(sf.getAttribute(index).asInstanceOf[Date].getTime)
-          } else {
-            sf.getAttribute(index)
+        if (fieldType == TimestampType) {
+          sf: SimpleFeature => {
+            val attr = sf.getAttribute(index)
+            if (attr == null) { null } else {
+              new Timestamp(attr.asInstanceOf[Date].getTime)
+            }
           }
+        } else {
+          sf: SimpleFeature => sf.getAttribute(index)
+        }
     }
   }
 

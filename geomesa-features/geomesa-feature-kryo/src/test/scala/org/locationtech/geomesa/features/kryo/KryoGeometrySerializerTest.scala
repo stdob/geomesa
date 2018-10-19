@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -36,24 +36,22 @@ class KryoGeometrySerializerTest extends Specification {
       ).map(WKTUtils.read)
 
       "using byte arrays" >> {
-        geoms.foreach { geom =>
+        foreach(geoms) { geom =>
           val out = new Output(512)
           KryoGeometrySerialization.serialize(out, geom)
           val in = new Input(out.toBytes)
           val deserialized = KryoGeometrySerialization.deserialize(in)
           deserialized mustEqual geom
         }
-        success
       }
       "using streams" >> {
-        geoms.foreach { geom =>
+        foreach(geoms) { geom =>
           val out = new Output(new ByteArrayOutputStream(), 512)
           KryoGeometrySerialization.serialize(out, geom)
           val in = new Input(new ByteArrayInputStream(out.toBytes))
           val deserialized = KryoGeometrySerialization.deserialize(in)
           deserialized mustEqual geom
         }
-        success
       }
     }
 

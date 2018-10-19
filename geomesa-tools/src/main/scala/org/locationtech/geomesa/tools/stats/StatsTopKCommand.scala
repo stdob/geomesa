@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -38,7 +38,7 @@ trait StatsTopKCommand[DS <: DataStore with HasGeoMesaStats] extends DataStoreCo
 
     attributes.foreach { attribute =>
       Command.output.info(s"Top values for '$attribute':")
-      val stat = results.find(_.attribute == sft.indexOf(attribute))
+      val stat = results.find(_.property == attribute)
       stat match {
         case None => Command.output.info("  unavailable")
         case Some(s) =>

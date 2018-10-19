@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -17,7 +17,7 @@ import org.locationtech.geomesa.utils.cache.FilePersistence
 import org.locationtech.geomesa.utils.io.PathUtils
 import org.scalatra.test.specs2.MutableScalatraSpec
 import org.specs2.runner.JUnitRunner
-import org.specs2.specification.{Fragments, Step}
+import org.specs2.specification.core.Fragments
 
 @RunWith(classOf[JUnitRunner])
 class GeoJsonServletTest extends MutableScalatraSpec {
@@ -36,7 +36,7 @@ class GeoJsonServletTest extends MutableScalatraSpec {
   def urlEncode(s: String): String = URLEncoder.encode(s, "UTF-8")
 
   // cleanup tmp dir after tests run
-  override def map(fragments: => Fragments) = super.map(fragments) ^ Step {
+  override def map(fragments: => Fragments): Fragments = super.map(fragments) ^ step {
     PathUtils.deleteRecursively(tmpDir)
   }
 

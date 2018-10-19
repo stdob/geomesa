@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -19,15 +19,14 @@ import org.geotools.factory.Hints
 import org.geotools.filter.text.ecql.ECQL
 import org.locationtech.geomesa.index.conf.QueryHints
 import org.locationtech.geomesa.index.geoserver.ViewParams
-import org.locationtech.geomesa.index.geotools.GeoMesaDataStore
+import org.locationtech.geomesa.index.iterators.BinAggregatingScan
 import org.locationtech.geomesa.tools.export.formats.{BinExporter, NullExporter, ShapefileExporter, _}
 import org.locationtech.geomesa.tools.utils.DataFormats
 import org.locationtech.geomesa.tools.utils.DataFormats._
 import org.locationtech.geomesa.tools.{Command, DataStoreCommand, OptionalIndexParam, TypeNameParam}
 import org.locationtech.geomesa.utils.collection.CloseableIterator
-import org.locationtech.geomesa.utils.index.IndexMode
 import org.locationtech.geomesa.utils.io.{CloseWithLogging, WithClose}
-import org.locationtech.geomesa.utils.stats.{MethodProfiling, Timing}
+import org.locationtech.geomesa.utils.stats.MethodProfiling
 import org.opengis.feature.simple.SimpleFeatureType
 import org.opengis.filter.Filter
 
@@ -39,17 +38,18 @@ trait ExportCommand[DS <: DataStore] extends DataStoreCommand[DS] with MethodPro
   override def params: ExportParams
 
   override def execute(): Unit = {
-    val timing = new Timing
-    val count = profile(withDataStore(export))(timing)
-    Command.user.info(s"Feature export complete to ${Option(params.file).map(_.getPath).getOrElse("standard out")} " +
-        s"in ${timing.time}ms${count.map(" for " + _ + " features").getOrElse("")}")
+    def complete(count: Option[Long], time: Long): Unit =
+      Command.user.info(s"Feature export complete to ${Option(params.file).map(_.getPath).getOrElse("standard out")} " +
+          s"in ${time}ms${count.map(" for " + _ + " features").getOrElse("")}")
+
+    profile(complete _)(withDataStore(export))
   }
 
   protected def export(ds: DS): Option[Long] = {
     import ExportCommand._
     import org.locationtech.geomesa.tools.utils.DataFormats._
 
-    val (query, attributes) = createQuery(ds, getSchema(ds), params.outputFormat, params)
+    val (query, attributes) = createQuery(getSchema(ds), params.outputFormat, params)
 
     val features = try { getFeatures(ds, query) } catch {
       case NonFatal(e) =>
@@ -62,10 +62,11 @@ trait ExportCommand[DS <: DataStore] extends DataStoreCommand[DS] with MethodPro
       case Csv | Tsv      => new DelimitedExporter(getWriter(params), params.outputFormat, attributes, !params.noHeader)
       case Shp            => new ShapefileExporter(checkShpFile(params))
       case GeoJson | Json => new GeoJsonExporter(getWriter(params))
-      case Gml            => new GmlExporter(createOutputStream(params.file, params.gzip))
+      case Gml | Xml      => new GmlExporter(createOutputStream(params.file, params.gzip))
       case Avro           => new AvroExporter(createOutputStream(params.file, null), avroCompression)
-      case Arrow          => new ArrowExporter(query.getHints, createOutputStream(params.file, null), ArrowExporter.queryDictionaries(ds, query))
-      case Bin            => new BinExporter(query.getHints, createOutputStream(params.file, null))
+      case Arrow          => new ArrowExporter(query.getHints, createOutputStream(params.file, params.gzip), ArrowExporter.queryDictionaries(ds, query))
+      case Bin            => new BinExporter(query.getHints, createOutputStream(params.file, params.gzip))
+      case Leaflet        => new LeafletMapExporter(params)
       case Null           => NullExporter
       // shouldn't happen unless someone adds a new format and doesn't implement it here
       case _              => throw new UnsupportedOperationException(s"Format ${params.outputFormat} can't be exported")
@@ -92,8 +93,7 @@ trait ExportCommand[DS <: DataStore] extends DataStoreCommand[DS] with MethodPro
 
 object ExportCommand extends LazyLogging {
 
-  def createQuery(ds: DataStore,
-                  toSft: => SimpleFeatureType,
+  def createQuery(toSft: => SimpleFeatureType,
                   fmt: DataFormat,
                   params: ExportParams): (Query, Option[ExportAttributes]) = {
     val typeName = Option(params).collect { case p: TypeNameParam => p.featureName }.orNull
@@ -103,29 +103,30 @@ object ExportCommand extends LazyLogging {
     val query = new Query(typeName, filter)
     Option(params.maxFeatures).map(Int.unbox).foreach(query.setMaxFeatures)
     Option(params).collect { case p: OptionalIndexParam => p }.foreach { p =>
-      val gmds = Option(ds).collect { case d: GeoMesaDataStore[_, _, _] => d }.orNull
-      p.loadIndex(gmds, IndexMode.Read).foreach { index =>
+      Option(p.index).foreach { index =>
+        logger.debug(s"Using index $index")
         query.getHints.put(QueryHints.QUERY_INDEX, index)
-        logger.debug(s"Using index ${index.identifier}")
       }
+    }
+
+    Option(params.hints).foreach { hints =>
+      query.getHints.put(Hints.VIRTUAL_TABLE_PARAMETERS, hints)
+      ViewParams.setHints(query)
     }
 
     if (fmt == DataFormats.Arrow) {
       query.getHints.put(QueryHints.ARROW_ENCODE, java.lang.Boolean.TRUE)
     } else if (fmt == DataFormats.Bin) {
-      // this indicates to run a BIN query, will be overridden by hints if specified
-      query.getHints.put(QueryHints.BIN_TRACK, "id")
-    }
-
-    Option(params.hints).foreach { hints =>
-      query.getHints.put(Hints.VIRTUAL_TABLE_PARAMETERS, hints)
-      ViewParams.setHints(sft, query)
+      // if not specified in hints, set it here to trigger the bin query
+      if (!query.getHints.containsKey(QueryHints.BIN_TRACK)) {
+        query.getHints.put(QueryHints.BIN_TRACK, "id")
+      }
     }
 
     val attributes = {
       import scala.collection.JavaConversions._
       val provided = Option(params.attributes).collect { case a if !a.isEmpty => a.toSeq }.orElse {
-        if (fmt == DataFormats.Bin) { Some(BinExporter.getAttributeList(sft, query.getHints)) } else { None }
+        if (fmt == DataFormats.Bin) { Some(BinAggregatingScan.propertyNames(query.getHints, sft)) } else { None }
       }
       if (fmt == DataFormats.Shp) {
         val attributes = provided.map(ShapefileExporter.replaceGeom(sft, _)).getOrElse(ShapefileExporter.modifySchema(sft))
@@ -155,6 +156,8 @@ object ExportCommand extends LazyLogging {
   }
 
   def getWriter(params: FileExportParams): Writer = new OutputStreamWriter(createOutputStream(params.file, params.gzip))
+
+  def getWriter(file: File, compress: Integer): Writer = new OutputStreamWriter(createOutputStream(file, compress))
 
   def checkShpFile(params: FileExportParams): File = {
     if (params.file != null) { params.file } else {

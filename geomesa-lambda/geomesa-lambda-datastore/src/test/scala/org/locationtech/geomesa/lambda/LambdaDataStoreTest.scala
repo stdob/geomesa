@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -18,7 +18,7 @@ import org.geotools.factory.Hints
 import org.locationtech.geomesa.arrow.io.SimpleFeatureArrowFileReader
 import org.locationtech.geomesa.features.ScalaSimpleFeature
 import org.locationtech.geomesa.index.conf.QueryHints
-import org.locationtech.geomesa.index.utils.KryoLazyStatsUtils
+import org.locationtech.geomesa.index.iterators.StatsScan
 import org.locationtech.geomesa.lambda.LambdaTestRunnerTest.LambdaTest
 import org.locationtech.geomesa.lambda.data.LambdaDataStore
 import org.locationtech.geomesa.utils.bin.BinaryOutputEncoder
@@ -33,6 +33,7 @@ import org.specs2.matcher.MatchResult
 class LambdaDataStoreTest extends LambdaTest with LazyLogging {
 
   import scala.collection.JavaConversions._
+  import scala.concurrent.duration._
 
   sequential
 
@@ -93,7 +94,7 @@ class LambdaDataStoreTest extends LambdaTest with LazyLogging {
     // note: need to copy the features as the same object is re-used in the iterator
     val result = SelfClosingIterator(ds.getFeatureReader(query, Transaction.AUTO_COMMIT)).toSeq
     result must haveLength(1)
-    val stat = KryoLazyStatsUtils.decodeStat(sft)(result.head.getAttribute(0).asInstanceOf[String])
+    val stat = StatsScan.decodeStat(sft)(result.head.getAttribute(0).asInstanceOf[String])
     stat must beAnInstanceOf[EnumerationStat[String]]
     stat.asInstanceOf[EnumerationStat[String]].frequencies must containTheSameElementsAs(Seq(("n0", 1L), ("n1", 1L)))
 
@@ -137,8 +138,8 @@ class LambdaDataStoreTest extends LambdaTest with LazyLogging {
 
           // test queries against the transient store
           forall(Seq(ds, readOnly)) { store =>
-            store.transients.get(sft.getTypeName).read().toSeq must
-                eventually(40, 100.millis)(containTheSameElementsAs(features))
+            eventually(40, 100.millis)(store.transients.get(sft.getTypeName).read().toSeq must
+                containTheSameElementsAs(features))
             SelfClosingIterator(store.getFeatureReader(new Query(sft.getTypeName), Transaction.AUTO_COMMIT)).toSeq must
                 containTheSameElementsAs(features)
           }
@@ -152,7 +153,7 @@ class LambdaDataStoreTest extends LambdaTest with LazyLogging {
           ds.persist(sft.getTypeName)
           // test mixed queries against both stores
           forall(Seq(ds, readOnly)) { store =>
-            store.transients.get(sft.getTypeName).read().toSeq must eventually(40, 100.millis)(beEqualTo(features.drop(1)))
+            eventually(40, 100.millis)(store.transients.get(sft.getTypeName).read().toSeq must beEqualTo(features.drop(1)))
             SelfClosingIterator(store.getFeatureReader(new Query(sft.getTypeName), Transaction.AUTO_COMMIT)).toSeq must
                 containTheSameElementsAs(features)
           }
@@ -179,7 +180,7 @@ class LambdaDataStoreTest extends LambdaTest with LazyLogging {
           ds.persist(sft.getTypeName)
           // test queries against the persistent store
           forall(Seq(ds, readOnly)) { store =>
-            store.transients.get(sft.getTypeName).read() must eventually(40, 100.millis)(beEmpty)
+            eventually(40, 100.millis)(store.transients.get(sft.getTypeName).read() must beEmpty)
             SelfClosingIterator(store.getFeatureReader(new Query(sft.getTypeName), Transaction.AUTO_COMMIT)).toSeq must
                 containTheSameElementsAs(features)
           }

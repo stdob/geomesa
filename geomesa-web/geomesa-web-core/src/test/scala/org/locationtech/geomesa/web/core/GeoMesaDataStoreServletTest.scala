@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -11,6 +11,7 @@ package org.locationtech.geomesa.web.core
 import java.net.URLEncoder
 import java.nio.file.Files
 
+import org.geotools.data.DataStore
 import org.json4s.{DefaultFormats, Formats}
 import org.junit.runner.RunWith
 import org.locationtech.geomesa.utils.cache.FilePersistence
@@ -19,7 +20,7 @@ import org.scalatra.Ok
 import org.scalatra.json.NativeJsonSupport
 import org.scalatra.test.specs2.MutableScalatraSpec
 import org.specs2.runner.JUnitRunner
-import org.specs2.specification.{Fragments, Step}
+import org.specs2.specification.core.Fragments
 
 @RunWith(classOf[JUnitRunner])
 class GeoMesaDataStoreServletTest extends MutableScalatraSpec {
@@ -31,7 +32,7 @@ class GeoMesaDataStoreServletTest extends MutableScalatraSpec {
   def urlEncode(s: String): String = URLEncoder.encode(s, "UTF-8")
 
   // cleanup tmp dir after tests run
-  override def map(fragments: => Fragments) = super.map(fragments) ^ Step {
+  override def map(fragments: => Fragments): Fragments = super.map(fragments) ^ step {
     PathUtils.deleteRecursively(tmpDir)
   }
 
@@ -49,7 +50,7 @@ class GeoMesaDataStoreServletTest extends MutableScalatraSpec {
 
     get("/test") {
       try {
-        withDataStore((ds) => { calledTest = true; Ok() })
+        withDataStore((_: DataStore) => { calledTest = true; Ok() })
       } catch {
         case e: Exception => handleError(s"Error creating index:", e)
       }

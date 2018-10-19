@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -30,7 +30,7 @@ class ViewParamsTest extends Specification {
       def testHint(hint: Hints.Key, name: String, param: String, expected: Any): MatchResult[Any] = {
         val query = new Query()
         query.getHints.put(Hints.VIRTUAL_TABLE_PARAMETERS, Collections.singletonMap(name, param))
-        ViewParams.setHints(null, query)
+        ViewParams.setHints(query)
         query.getHints.get(hint) mustEqual expected
       }
 

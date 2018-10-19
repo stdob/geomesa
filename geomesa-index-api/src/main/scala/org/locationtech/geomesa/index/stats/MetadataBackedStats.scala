@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -91,7 +91,7 @@ trait MetadataBackedStats extends GeoMesaStats with StatsBasedEstimator with Laz
       val geomDtgOption = for {
         geom <- Option(sft.getGeomField)
         dtg  <- sft.getDtgField
-        if toRetrieve.exists(_ == geom) && toRetrieve.exists(_ == dtg)
+        if toRetrieve.contains(geom) && toRetrieve.contains(dtg)
       } yield {
         (geom, dtg)
       }
@@ -131,7 +131,7 @@ trait MetadataBackedStats extends GeoMesaStats with StatsBasedEstimator with Laz
     logger.debug(s"Writing stats for ${sft.getTypeName}")
 
     // write the stats in one go - don't merge, this is the authoritative value
-    writeStat(new SeqStat(stats), sft, merge = false)
+    writeStat(new SeqStat(sft, stats), sft, merge = false)
 
     // update our last run time
     val date = GeoToolsDateFormat.format(Instant.now().atZone(ZoneOffset.UTC))
@@ -186,29 +186,24 @@ trait MetadataBackedStats extends GeoMesaStats with StatsBasedEstimator with Laz
     * @return metadata keys and split stats
     */
   protected def getKeysAndStatsForWrite(stat: Stat, sft: SimpleFeatureType): Seq[KeyAndStat] = {
-    def name(i: Int) = sft.getDescriptor(i).getLocalName
-
     stat match {
       case s: SeqStat      => s.stats.flatMap(getKeysAndStatsForWrite(_, sft))
       case s: CountStat    => Seq(KeyAndStat(countKey(), s))
-      case s: MinMax[_]    => Seq(KeyAndStat(minMaxKey(name(s.attribute)), s))
-      case s: TopK[_]      => Seq(KeyAndStat(topKKey(name(s.attribute)), s))
-      case s: Histogram[_] => Seq(KeyAndStat(histogramKey(name(s.attribute)), s))
+      case s: MinMax[_]    => Seq(KeyAndStat(minMaxKey(s.property), s))
+      case s: TopK[_]      => Seq(KeyAndStat(topKKey(s.property), s))
+      case s: Histogram[_] => Seq(KeyAndStat(histogramKey(s.property), s))
 
       case s: Frequency[_] =>
-        val attribute = name(s.attribute)
-        if (s.dtgIndex == -1) {
-          Seq(KeyAndStat(frequencyKey(attribute), s))
+        if (s.dtg.isEmpty) {
+          Seq(KeyAndStat(frequencyKey(s.property), s))
         } else {
           // split up the frequency and store by week
-          s.splitByTime.map { case (b, f) => KeyAndStat(frequencyKey(attribute, b), f) }
+          s.splitByTime.map { case (b, f) => KeyAndStat(frequencyKey(s.property, b), f) }
         }
 
       case s: Z3Histogram  =>
-        val geom = name(s.geomIndex)
-        val dtg  = name(s.dtgIndex)
         // split up the z3 histogram and store by week
-        s.splitByTime.map { case (b, z) => KeyAndStat(histogramKey(geom, dtg, b), z) }
+        s.splitByTime.map { case (b, z) => KeyAndStat(histogramKey(s.geom, s.dtg, b), z) }
 
       case _ => throw new NotImplementedError("Only Count, Frequency, MinMax, TopK and Histogram stats are tracked")
     }
@@ -231,7 +226,8 @@ trait MetadataBackedStats extends GeoMesaStats with StatsBasedEstimator with Laz
     * We always collect a total count stat.
     * For the default geometry and default date, we collect a min/max and histogram.
     * If there is both a default geometry and date, we collect a z3 histogram.
-    * For any indexed attributes, we collect a min/max, frequency and histogram.
+    * For any indexed attributes, we collect a min/max, top-k, frequency and histogram.
+    * For any flagged attributes, we collect min/max and top-k
     *
     * @param sft simple feature type
     * @return stat string

@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,19 +8,23 @@
 
 package org.locationtech.geomesa.index.index
 
+import com.typesafe.scalalogging.LazyLogging
 import org.geotools.data.{Query, Transaction}
 import org.geotools.factory.Hints
 import org.geotools.filter.text.ecql.ECQL
-import org.joda.time.format.ISODateTimeFormat
+import org.geotools.util.Converters
 import org.junit.runner.RunWith
 import org.locationtech.geomesa.features.ScalaSimpleFeature
 import org.locationtech.geomesa.index.TestGeoMesaDataStore
-import org.locationtech.geomesa.index.TestGeoMesaDataStore.{TestAttributeIndex, TestQueryPlan, TestRange}
+import org.locationtech.geomesa.index.TestGeoMesaDataStore.{TestAttributeIndex, TestRange}
 import org.locationtech.geomesa.index.conf.QueryHints
+import org.locationtech.geomesa.index.index.attribute.AttributeIndexKey
 import org.locationtech.geomesa.index.utils.{ExplainNull, Explainer}
 import org.locationtech.geomesa.utils.collection.SelfClosingIterator
 import org.locationtech.geomesa.utils.geotools.{FeatureUtils, SimpleFeatureTypes}
+import org.locationtech.geomesa.utils.index.ByteArrays
 import org.locationtech.geomesa.utils.io.WithClose
+import org.locationtech.geomesa.utils.stats.Cardinality
 import org.locationtech.geomesa.utils.text.WKTUtils
 import org.specs2.mutable.Specification
 import org.specs2.runner.JUnitRunner
@@ -28,24 +32,22 @@ import org.specs2.runner.JUnitRunner
 import scala.util.Random
 
 @RunWith(classOf[JUnitRunner])
-class AttributeIndexTest extends Specification {
+class AttributeIndexTest extends Specification with LazyLogging {
 
   val typeName = "attr-idx-test"
   val spec = "name:String:index=true,age:Int:index=true,height:Float:index=true,dtg:Date,*geom:Point:srid=4326"
 
   val sft = SimpleFeatureTypes.createType(typeName, spec)
 
-  val df = ISODateTimeFormat.dateTime()
-
   val aliceGeom   = WKTUtils.read("POINT(45.0 49.0)")
   val billGeom    = WKTUtils.read("POINT(46.0 49.0)")
   val bobGeom     = WKTUtils.read("POINT(47.0 49.0)")
   val charlesGeom = WKTUtils.read("POINT(48.0 49.0)")
 
-  val aliceDate   = df.parseDateTime("2012-01-01T12:00:00.000Z").toDate
-  val billDate    = df.parseDateTime("2013-01-01T12:00:00.000Z").toDate
-  val bobDate     = df.parseDateTime("2014-01-01T12:00:00.000Z").toDate
-  val charlesDate = df.parseDateTime("2014-01-01T12:30:00.000Z").toDate
+  val aliceDate   = Converters.convert("2012-01-01T12:00:00.000Z", classOf[java.util.Date])
+  val billDate    = Converters.convert("2013-01-01T12:00:00.000Z", classOf[java.util.Date])
+  val bobDate     = Converters.convert("2014-01-01T12:00:00.000Z", classOf[java.util.Date])
+  val charlesDate = Converters.convert("2014-01-01T12:30:00.000Z", classOf[java.util.Date])
 
   val features = Seq(
     Array("alice",   20,   10f, aliceDate,   aliceGeom),
@@ -57,19 +59,19 @@ class AttributeIndexTest extends Specification {
   }
 
   def overlaps(r1: TestRange, r2: TestRange): Boolean = {
-    TestGeoMesaDataStore.byteComparator.compare(r1.start, r2.start) match {
+    ByteArrays.ByteOrdering.compare(r1.start, r2.start) match {
       case 0 => true
-      case i if i < 0 => TestGeoMesaDataStore.byteComparator.compare(r1.end, r2.start) > 0
-      case i if i > 0 => TestGeoMesaDataStore.byteComparator.compare(r2.end, r1.start) > 0
+      case i if i < 0 => ByteArrays.ByteOrdering.compare(r1.end, r2.start) > 0
+      case i if i > 0 => ByteArrays.ByteOrdering.compare(r2.end, r1.start) > 0
     }
   }
 
   "AttributeIndex" should {
     "convert shorts to bytes and back" in {
       forall(Seq(0, 32, 127, 128, 129, 255, 256, 257)) { i =>
-        val bytes = AttributeIndex.indexToBytes(i)
+        val bytes = AttributeIndexKey.indexToBytes(i)
         bytes must haveLength(2)
-        val recovered = AttributeIndex.bytesToIndex(bytes(0), bytes(1))
+        val recovered = ByteArrays.readShort(bytes)
         recovered mustEqual i
       }
     }
@@ -89,9 +91,8 @@ class AttributeIndexTest extends Specification {
         val q = new Query(typeName, ECQL.toFilter(filter))
         // validate that ranges do not overlap
         foreach(ds.getQueryPlan(q, explainer = explain)) { qp =>
-          val ordering = Ordering.comparatorToOrdering(TestGeoMesaDataStore.byteComparator)
-          val ranges = qp.asInstanceOf[TestQueryPlan].ranges.sortBy(_.start)(ordering)
-          forall(ranges.sliding(2)) { case Seq(left, right) => overlaps(left, right) must beFalse }
+          val ranges = qp.ranges.sortBy(_.start)(ByteArrays.ByteOrdering)
+          forall(ranges.sliding(2).toSeq) { case Seq(left, right) => overlaps(left, right) must beFalse }
         }
         SelfClosingIterator(ds.getFeatureReader(q, Transaction.AUTO_COMMIT)).map(_.getID).toSeq
       }
@@ -104,6 +105,29 @@ class AttributeIndexTest extends Specification {
       val results = execute(s"height = 12.0 AND $stFilter")
       results must haveLength(1)
       results must contain("bob")
+    }
+
+    "correctly set secondary index ranges with not nulls" in {
+      import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
+
+      val ds = new TestGeoMesaDataStore(true)
+      ds.createSchema(sft)
+
+      WithClose(ds.getFeatureWriterAppend(typeName, Transaction.AUTO_COMMIT)) { writer =>
+        features.foreach { f =>
+          FeatureUtils.copyToWriter(writer, f, useProvidedFid = true)
+          writer.write()
+        }
+      }
+
+      val filter = "contains('POLYGON ((46.9 48.9, 47.1 48.9, 47.1 49.1, 46.9 49.1, 46.9 48.9))', geom) AND " +
+          "name = 'bob' AND dtg IS NOT NULL AND name IS NOT NULL AND INCLUDE"
+      val q = new Query(sft.getTypeName, ECQL.toFilter(filter))
+
+      ds.getQueryPlan(q).flatMap(_.ranges) must haveLength(sft.getAttributeShards)
+
+      val results = SelfClosingIterator(ds.getFeatureReader(q, Transaction.AUTO_COMMIT)).map(_.getID).toList
+      results mustEqual Seq("bob")
     }
 
     "handle functions" in {
@@ -203,9 +227,35 @@ class AttributeIndexTest extends Specification {
 
       // set the check fairly high so that we don't get random test failures, but log a warning
       if (time > 500L) {
-        System.err.println(s"WARNING: attribute query processing took ${time}ms for large query")
+        logger.warn(s"Attribute query processing took ${time}ms for large OR query")
       }
       time must beLessThan(10000L)
+    }
+
+    "de-prioritize not-null queries" in {
+      import org.locationtech.geomesa.utils.geotools.RichAttributeDescriptors.RichAttributeDescriptor
+
+      val spec = "name:String:index=true:cardinality=high,age:Int:index=true,height:Float:index=true," +
+          "dtg:Date,*geom:Point:srid=4326"
+      val sft = SimpleFeatureTypes.createType(typeName, spec)
+
+      val ds = new TestGeoMesaDataStore(true)
+      ds.createSchema(sft)
+
+      ds.getSchema(typeName).getDescriptor("name").getCardinality mustEqual Cardinality.HIGH
+
+      val notNull = ECQL.toFilter("name IS NOT NULL")
+      val notNullPlans = ds.getQueryPlan(new Query(typeName, notNull))
+      notNullPlans must haveLength(1)
+      notNullPlans.head.index must beAnInstanceOf[TestAttributeIndex]
+      notNullPlans.head.filter.primary must beSome(notNull)
+      notNullPlans.head.filter.secondary must beNone
+
+      val agePlans = ds.getQueryPlan(new Query(typeName, ECQL.toFilter("age = 21 AND name IS NOT NULL")))
+      agePlans must haveLength(1)
+      agePlans.head.index must beAnInstanceOf[TestAttributeIndex]
+      agePlans.head.filter.primary must beSome(ECQL.toFilter("age = 21"))
+      agePlans.head.filter.secondary must beSome(notNull)
     }
   }
 }

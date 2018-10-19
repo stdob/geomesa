@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,6 +8,8 @@
 
 package org.locationtech.geomesa.features
 
+import org.locationtech.geomesa.features.SerializationOption.Value
+
 /**
  * Options to be applied when encoding.  The same options must be specified when decoding.
  */
@@ -15,10 +17,10 @@ object SerializationOption extends Enumeration {
 
   type SerializationOption = Value
 
-  val WithUserData = Value
-  val WithoutId = Value
-  val Immutable = Value
-  val Lazy = Value
+  val WithUserData :Value = Value
+  val WithoutId    :Value = Value
+  val Immutable    :Value = Value
+  val Lazy         :Value = Value
 
   implicit class SerializationOptions(val options: Set[SerializationOption]) extends AnyVal {
 

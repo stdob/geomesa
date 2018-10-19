@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -19,39 +19,40 @@ import org.apache.accumulo.core.conf.Property
 import org.apache.hadoop.io.Text
 import org.locationtech.geomesa.accumulo.AccumuloVersion
 import org.locationtech.geomesa.accumulo.data.{AccumuloDataStore, AccumuloFeature}
-import org.locationtech.geomesa.accumulo.index.AccumuloFeatureIndex
+import org.locationtech.geomesa.accumulo.index.{AccumuloColumnGroups, AccumuloFeatureIndex}
 import org.locationtech.geomesa.curve.BinnedTime.TimeToBinnedTime
 import org.locationtech.geomesa.curve.{BinnedTime, LegacyZ3SFC}
 import org.locationtech.geomesa.index.api.GeoMesaFeatureIndex
 import org.locationtech.geomesa.index.utils.SplitArrays
 import org.locationtech.geomesa.utils.geotools.Conversions._
 import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
-import org.opengis.feature.simple.SimpleFeatureType
+import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 
 import scala.collection.JavaConversions._
 
 trait Z3WritableIndex extends AccumuloFeatureIndex {
 
-  import AccumuloFeatureIndex.{BinColumnFamily, FullColumnFamily}
+  import AccumuloColumnGroups.BinColumnFamily
   import Z3IndexV2._
 
   def hasSplits: Boolean
 
-  override def delete(sft: SimpleFeatureType, ds: AccumuloDataStore, shared: Boolean): Unit = {
-    val table = getTableName(sft.getTypeName, ds)
-    if (ds.tableOps.exists(table)) {
-      // we need to synchronize deleting of tables in mock accumulo as it's not thread safe
-      if (ds.connector.isInstanceOf[MockConnector]) {
-        ds.connector.synchronized(ds.tableOps.delete(table))
-      } else {
-        ds.tableOps.delete(table)
+  override def delete(sft: SimpleFeatureType, ds: AccumuloDataStore, partition: Option[String]): Unit = {
+    getTableNames(sft, ds, partition).par.foreach { table =>
+      if (ds.tableOps.exists(table)) {
+        // we need to synchronize deleting of tables in mock accumulo as it's not thread safe
+        if (ds.connector.isInstanceOf[MockConnector]) {
+          ds.connector.synchronized(ds.tableOps.delete(table))
+        } else {
+          ds.tableOps.delete(table)
+        }
       }
     }
   }
 
-  override def getIdFromRow(sft: SimpleFeatureType): (Array[Byte], Int, Int) => String = {
+  override def getIdFromRow(sft: SimpleFeatureType): (Array[Byte], Int, Int, SimpleFeature) => String = {
     val start = getIdRowOffset(sft)
-    (row, offset, length) => new String(row, offset + start, length - start, StandardCharsets.UTF_8)
+    (row, offset, length, feature) => new String(row, offset + start, length - start, StandardCharsets.UTF_8)
   }
 
   // split(1 byte), week(2 bytes), z value (8 bytes), id (n bytes)
@@ -131,16 +132,16 @@ trait Z3WritableIndex extends AccumuloFeatureIndex {
     prefix + length
   }
 
-  override def configure(sft: SimpleFeatureType, ds: AccumuloDataStore): Unit = {
+  override def configure(sft: SimpleFeatureType, ds: AccumuloDataStore, partition: Option[String]): String = {
     // z3 always has it's own table
     // note: we don't call super as it will write the table name we're overriding
     val suffix = GeoMesaFeatureIndex.tableSuffix(this)
     val table = GeoMesaFeatureIndex.formatSoloTableName(ds.config.catalog, suffix, sft.getTypeName)
-    ds.metadata.insert(sft.getTypeName, tableNameKey, table)
+    ds.metadata.insert(sft.getTypeName, tableNameKey(None), table)
 
     AccumuloVersion.ensureTableExists(ds.connector, table)
 
-    val localityGroups = Seq(BinColumnFamily, FullColumnFamily).map(cf => (cf.toString, ImmutableSet.of(cf))).toMap
+    val localityGroups = Seq(BinColumnFamily, AccumuloColumnGroups.default).map(cf => (cf.toString, ImmutableSet.of(cf))).toMap
     ds.tableOps.setLocalityGroups(table, localityGroups)
 
     // drop first split, otherwise we get an empty tablet
@@ -152,5 +153,7 @@ trait Z3WritableIndex extends AccumuloFeatureIndex {
     }
 
     ds.tableOps.setProperty(table, Property.TABLE_BLOCKCACHE_ENABLED.getKey, "true")
+
+    table
   }
 }

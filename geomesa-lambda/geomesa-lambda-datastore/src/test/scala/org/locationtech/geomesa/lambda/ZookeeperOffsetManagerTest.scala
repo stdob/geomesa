@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -14,6 +14,8 @@ import org.locationtech.geomesa.lambda.stream.OffsetManager.OffsetListener
 import org.locationtech.geomesa.lambda.stream.ZookeeperOffsetManager
 
 class ZookeeperOffsetManagerTest extends LambdaTest with LazyLogging {
+
+  import scala.concurrent.duration._
 
   sequential
 
@@ -39,10 +41,10 @@ class ZookeeperOffsetManagerTest extends LambdaTest with LazyLogging {
       })
 
       manager.setOffset("bar", 0, 1)
-      triggers.toMap must eventually(40, 100.millis)(beEqualTo(Map(0 -> 1, 1 -> 0, 2 -> 0)))
+      eventually(40, 100.millis)(triggers.toMap must beEqualTo(Map(0 -> 1, 1 -> 0, 2 -> 0)))
       manager.setOffset("bar", 0, 2)
       manager.setOffset("bar", 2, 1)
-      triggers.toMap must eventually(40, 100.millis)(beEqualTo(Map(0 -> 2, 1 -> 0, 2 -> 1)))
+      eventually(40, 100.millis)(triggers.toMap must beEqualTo(Map(0 -> 2, 1 -> 0, 2 -> 1)))
     }
   }
 

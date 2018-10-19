@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -77,7 +77,7 @@ object RasterEntryEncoder extends LazyLogging {
   private def getCF(raster: Raster): Text = new Text("")
 
   private def getCQ(raster: Raster): Text = {
-    new Text(RasterEntry.encodeIndexCQMetadata(raster.id, raster.metadata.geom, Option(raster.time.toDate)))
+    new Text(RasterEntry.encodeIndexCQMetadata(raster.id, raster.metadata.geom, Option(Date.from(raster.time.toInstant))))
   }
 
   private def encodeValue(raster: Raster): Value = new Value(raster.serializedChunk)

@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -20,7 +20,7 @@ class GeoMesaIndexPropertyTransformer(idPath: Option[Seq[PathElement]], dtgPath:
 
   override def transform(prop: String): String = {
     JsonPathParser.parse(prop) match {
-      case Seq(PathAttribute("geometry")) => "geom"
+      case Seq(PathAttribute("geometry", _)) => "geom"
       case `dtgPath` => "dtg"
       case x => JsonPathParser.print(PathAttribute("json") +: x)
     }

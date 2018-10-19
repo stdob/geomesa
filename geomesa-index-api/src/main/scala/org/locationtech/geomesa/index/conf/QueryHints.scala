@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -16,6 +16,7 @@ import org.locationtech.geomesa.index.planning.QueryPlanner.CostEvaluation
 import org.locationtech.geomesa.index.planning.QueryPlanner.CostEvaluation.CostEvaluation
 import org.locationtech.geomesa.utils.text.StringSerialization
 import org.opengis.feature.simple.SimpleFeatureType
+import org.opengis.filter.sort.{SortBy, SortOrder}
 
 object QueryHints {
 
@@ -46,6 +47,7 @@ object QueryHints {
 
   val ARROW_ENCODE             = new ClassKey(classOf[java.lang.Boolean])
   val ARROW_INCLUDE_FID        = new ClassKey(classOf[java.lang.Boolean])
+  val ARROW_PROXY_FID          = new ClassKey(classOf[java.lang.Boolean])
   val ARROW_BATCH_SIZE         = new ClassKey(classOf[java.lang.Integer])
   val ARROW_SORT_FIELD         = new ClassKey(classOf[java.lang.String])
   val ARROW_SORT_REVERSE       = new ClassKey(classOf[java.lang.Boolean])
@@ -65,7 +67,28 @@ object QueryHints {
     val RETURN_SFT       = new ClassKey(classOf[SimpleFeatureType])
     val TRANSFORMS       = new ClassKey(classOf[String])
     val TRANSFORM_SCHEMA = new ClassKey(classOf[SimpleFeatureType])
+    val SORT_FIELDS      = new ClassKey(classOf[String])
     val SKIP_REDUCE      = new ClassKey(classOf[java.lang.Boolean])
+
+    def toSortHint(sortBy: Array[SortBy]): String = {
+      val hints = sortBy.map {
+        case SortBy.NATURAL_ORDER => ":false"
+        case SortBy.REVERSE_ORDER => ":true"
+        case sb =>
+          val name = Option(sb.getPropertyName).map(_.getPropertyName).getOrElse("")
+          s"$name:${sb.getSortOrder == SortOrder.DESCENDING}"
+      }
+      hints.mkString(",")
+    }
+
+    def fromSortHint(hint: String): Seq[(String, Boolean)] = {
+      hint.split(",").toSeq.map { h =>
+        h.split(":") match {
+          case Array(field, reverse) => (field, reverse.toBoolean)
+          case _ => throw new IllegalArgumentException(s"Invalid sort field, expected 'name:reverse' but got '$h'")
+        }
+      }
+    }
   }
 
   implicit class RichHints(val hints: Hints) extends AnyRef {
@@ -74,7 +97,7 @@ object QueryHints {
     def getRequestedIndex: Option[String] = Option(hints.get(QUERY_INDEX).asInstanceOf[String])
     def getCostEvaluation: CostEvaluation = {
       Option(hints.get(COST_EVALUATION).asInstanceOf[CostEvaluation])
-          .orElse(QueryProperties.QUERY_COST_TYPE.option.flatMap(t => CostEvaluation.values.find(_.toString.equalsIgnoreCase(t))))
+          .orElse(QueryProperties.QueryCostType.option.flatMap(t => CostEvaluation.values.find(_.toString.equalsIgnoreCase(t))))
           .getOrElse(CostEvaluation.Stats)
     }
     def isSkipReduce: Boolean = Option(hints.get(Internal.SKIP_REDUCE).asInstanceOf[java.lang.Boolean]).exists(_.booleanValue())
@@ -100,6 +123,7 @@ object QueryHints {
     def isArrowMultiFile: Boolean = Option(hints.get(ARROW_MULTI_FILE).asInstanceOf[java.lang.Boolean]).exists(Boolean.unbox)
     def isArrowDoublePass: Boolean = Option(hints.get(ARROW_DOUBLE_PASS).asInstanceOf[java.lang.Boolean]).exists(Boolean.unbox)
     def isArrowIncludeFid: Boolean = Option(hints.get(ARROW_INCLUDE_FID).asInstanceOf[java.lang.Boolean]).forall(Boolean.unbox)
+    def isArrowProxyFid: Boolean = Option(hints.get(ARROW_PROXY_FID).asInstanceOf[java.lang.Boolean]).exists(Boolean.unbox)
     def getArrowDictionaryFields: Seq[String] =
       Option(hints.get(ARROW_DICTIONARY_FIELDS).asInstanceOf[String]).toSeq.flatMap(_.split(",")).map(_.trim).filter(_.nonEmpty)
     def isArrowCachedDictionaries: Boolean =
@@ -129,6 +153,10 @@ object QueryHints {
       hints.remove(Internal.TRANSFORM_SCHEMA)
       hints.remove(Internal.TRANSFORMS)
     }
+    def getSortFields: Option[Seq[(String, Boolean)]] =
+      Option(hints.get(Internal.SORT_FIELDS).asInstanceOf[String]).map(Internal.fromSortHint).filterNot(_.isEmpty)
+    def getSortReadableString: String =
+      getSortFields.map(_.map { case (f, r) => s"$f ${if (r) "DESC" else "ASC" }"}.mkString(", ")).getOrElse("none")
     def isExactCount: Option[Boolean] = Option(hints.get(EXACT_COUNT)).map(_.asInstanceOf[Boolean])
     def isLambdaQueryPersistent: Boolean =
       Option(hints.get(LAMBDA_QUERY_PERSISTENT).asInstanceOf[java.lang.Boolean]).forall(_.booleanValue)

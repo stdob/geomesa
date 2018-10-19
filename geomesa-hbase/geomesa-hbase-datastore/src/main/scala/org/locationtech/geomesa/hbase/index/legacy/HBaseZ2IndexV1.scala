@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -17,6 +17,6 @@ import org.locationtech.geomesa.index.index.legacy.Z2LegacyIndex
 case object HBaseZ2IndexV1 extends HBaseLikeZ2IndexV1 with HBasePlatform with HBaseZ2PushDown
 
 trait HBaseLikeZ2IndexV1 extends HBaseFeatureIndex
-    with Z2LegacyIndex[HBaseDataStore, HBaseFeature, Mutation, Query, ScanConfig] {
+    with Z2LegacyIndex[HBaseDataStore, HBaseFeature, Mutation, Scan, ScanConfig] {
   override val version: Int = 1
 }

@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -17,7 +17,7 @@ import org.locationtech.geomesa.curve.TimePeriod.TimePeriod
 import org.locationtech.geomesa.curve.{BinnedTime, TimePeriod, Z3SFC}
 import org.locationtech.geomesa.utils.stats.MinMax.MinMaxGeometry
 import org.locationtech.sfcurve.zorder.Z3
-import org.opengis.feature.simple.SimpleFeature
+import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 
 /**
   * The histogram's state is stored in an indexed array, where the index is the bin number
@@ -25,17 +25,29 @@ import org.opengis.feature.simple.SimpleFeature
   *
   * Tracks geometry and date attributes as a single value.
   *
-  * @param geomIndex geometry attribute index in the sft
-  * @param dtgIndex date attribute index in the sft
+  * @param sft simple feature type
+  * @param geom geometry attribute in the sft
+  * @param dtg date attribute in the sft
   * @param period time period to use for z index
   * @param length number of bins the histogram has, per period
  */
-class Z3Histogram(val geomIndex: Int, val dtgIndex: Int, val period: TimePeriod, val length: Int)
-    extends Stat with LazyLogging {
+class Z3Histogram(val sft: SimpleFeatureType,
+                  val geom: String,
+                  val dtg: String,
+                  val period: TimePeriod,
+                  val length: Int) extends Stat with LazyLogging {
 
   import Z3Histogram._
 
   override type S = Z3Histogram
+
+  @deprecated("geom")
+  lazy val geomIndex: Int = g
+  @deprecated("dtg")
+  lazy val dtgIndex: Int = d
+
+  private val g = sft.indexOf(geom)
+  private val d = sft.indexOf(dtg)
 
   private val sfc = Z3SFC(period)
   private val timeToBin = BinnedTime.timeToBinnedTime(period)
@@ -75,7 +87,7 @@ class Z3Histogram(val geomIndex: Int, val dtgIndex: Int, val period: TimePeriod,
 
   private def fromKey(timeBin: Short, z: Long): (Geometry, Date) = {
     val (x, y, t) = sfc.invert(new Z3(z))
-    val dtg = binToDate(BinnedTime(timeBin, t)).toDate
+    val dtg = Date.from(binToDate(BinnedTime(timeBin, t)).toInstant)
     val geom = Z3Histogram.gf.createPoint(new Coordinate(x, y))
     (geom, dtg)
   }
@@ -88,15 +100,15 @@ class Z3Histogram(val geomIndex: Int, val dtgIndex: Int, val period: TimePeriod,
     */
   def splitByTime: Seq[(Short, Z3Histogram)] = {
     binMap.toSeq.map { case (w, bins) =>
-      val hist = new Z3Histogram(geomIndex, dtgIndex, period, length)
+      val hist = new Z3Histogram(sft, geom, dtg, period, length)
       hist.binMap.put(w, bins)
       (w, hist)
     }
   }
 
   override def observe(sf: SimpleFeature): Unit = {
-    val geom = sf.getAttribute(geomIndex).asInstanceOf[Geometry]
-    val dtg  = sf.getAttribute(dtgIndex).asInstanceOf[Date]
+    val geom = sf.getAttribute(g).asInstanceOf[Geometry]
+    val dtg  = sf.getAttribute(d).asInstanceOf[Date]
     if (geom != null && dtg != null) {
       try {
         val (timeBin, z3) = toKey(geom, dtg)
@@ -108,8 +120,8 @@ class Z3Histogram(val geomIndex: Int, val dtgIndex: Int, val period: TimePeriod,
   }
 
   override def unobserve(sf: SimpleFeature): Unit = {
-    val geom = sf.getAttribute(geomIndex).asInstanceOf[Geometry]
-    val dtg  = sf.getAttribute(dtgIndex).asInstanceOf[Date]
+    val geom = sf.getAttribute(g).asInstanceOf[Geometry]
+    val dtg  = sf.getAttribute(d).asInstanceOf[Date]
     if (geom != null && dtg != null) {
       try {
         val (timeBin, z3) = toKey(geom, dtg)
@@ -124,7 +136,7 @@ class Z3Histogram(val geomIndex: Int, val dtgIndex: Int, val period: TimePeriod,
     * Creates a new histogram by combining another histogram with this one
     */
   override def +(other: Z3Histogram): Z3Histogram = {
-    val plus = new Z3Histogram(geomIndex, dtgIndex, period, length)
+    val plus = new Z3Histogram(sft, geom, dtg, period, length)
     plus += this
     plus += other
     plus
@@ -150,7 +162,7 @@ class Z3Histogram(val geomIndex: Int, val dtgIndex: Int, val period: TimePeriod,
     }
   }
 
-  override def toJsonObject =
+  override def toJsonObject: Any =
     binMap.toSeq.sortBy(_._1)
       .map { case (p, bins) => (String.format(jsonFormat, Short.box(p)), bins) }
       .map { case (label, bins) => Map(label-> Map("bins" -> bins.counts)) }
@@ -161,7 +173,7 @@ class Z3Histogram(val geomIndex: Int, val dtgIndex: Int, val period: TimePeriod,
 
   override def isEquivalent(other: Stat): Boolean = other match {
     case that: Z3Histogram =>
-      geomIndex == that.geomIndex && dtgIndex == that.dtgIndex && period == that.period &&
+      g == that.g && d == that.d && period == that.period &&
           length == that.length && binMap.keySet == that.binMap.keySet &&
           binMap.forall { case (w, bins) => java.util.Arrays.equals(bins.counts, that.binMap(w).counts) }
     case _ => false
@@ -170,8 +182,8 @@ class Z3Histogram(val geomIndex: Int, val dtgIndex: Int, val period: TimePeriod,
 
 object Z3Histogram {
 
-  val gf = JTSFactoryFinder.getGeometryFactory
+  private val gf = JTSFactoryFinder.getGeometryFactory
 
-  val minGeom = MinMaxGeometry.min.asInstanceOf[Point]
-  val maxGeom = MinMaxGeometry.max.asInstanceOf[Point]
+  val minGeom: Point = MinMaxGeometry.min.asInstanceOf[Point]
+  val maxGeom: Point = MinMaxGeometry.max.asInstanceOf[Point]
 }

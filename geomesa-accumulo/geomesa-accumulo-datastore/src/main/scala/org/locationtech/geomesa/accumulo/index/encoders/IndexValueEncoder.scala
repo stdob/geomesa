@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -15,6 +15,7 @@ import com.vividsolutions.jts.geom.Geometry
 import org.geotools.feature.simple.SimpleFeatureTypeBuilder
 import org.geotools.filter.identity.FeatureIdImpl
 import org.locationtech.geomesa.features.SerializationOption.{SerializationOption, SerializationOptions}
+import org.locationtech.geomesa.features.SimpleFeatureSerializer.LimitedSerialization
 import org.locationtech.geomesa.features.kryo.{KryoFeatureSerializer, ProjectingKryoFeatureDeserializer, ProjectingKryoFeatureSerializer}
 import org.locationtech.geomesa.features.{ScalaSimpleFeature, SimpleFeatureSerializer}
 import org.locationtech.geomesa.utils.cache.{CacheKeyGenerator, SoftThreadLocalCache}
@@ -33,23 +34,17 @@ object IndexValueEncoder {
   def apply(sft: SimpleFeatureType, transform: SimpleFeatureType): SimpleFeatureSerializer = {
     val key = CacheKeyGenerator.cacheKey(sft)
     val indexSft = cache.getOrElseUpdate(key, getIndexSft(sft))
-    if (sft.getSchemaVersion < 4) { // kryo encoding introduced in version 4
-      OldIndexValueEncoder(sft, transform)
-    } else {
-      val encoder = KryoFeatureSerializer(indexSft)
-      val decoder = new ProjectingKryoFeatureDeserializer(indexSft, transform)
-      val copyFunction = getCopyFunction(sft, indexSft)
-      new IndexValueEncoderImpl(copyFunction, indexSft, encoder, decoder)
-    }
+    val encoder = KryoFeatureSerializer(indexSft)
+    val decoder = new ProjectingKryoFeatureDeserializer(indexSft, transform)
+    val copyFunction = getCopyFunction(sft, indexSft)
+    new IndexValueEncoderImpl(copyFunction, indexSft, encoder, decoder)
   }
 
 
   def apply(sft: SimpleFeatureType, includeIds: Boolean = false): SimpleFeatureSerializer = {
     val key = CacheKeyGenerator.cacheKey(sft)
     val indexSft = cache.getOrElseUpdate(key, getIndexSft(sft))
-    if (sft.getSchemaVersion < 4) { // kryo encoding introduced in version 4
-      OldIndexValueEncoder(sft, indexSft)
-    } else if (includeIds) {
+    if (includeIds) {
       val encoder = KryoFeatureSerializer(indexSft)
       val copyFunction = getCopyFunction(sft, indexSft)
       new IndexValueEncoderImpl(copyFunction, indexSft, encoder, encoder)
@@ -142,7 +137,8 @@ object IndexValueEncoder {
 class IndexValueEncoderImpl(copyFeature: (SimpleFeature, SimpleFeature) => Unit,
                             indexSft: SimpleFeatureType,
                             encoder: SimpleFeatureSerializer,
-                            decoder: SimpleFeatureSerializer) extends SimpleFeatureSerializer {
+                            decoder: SimpleFeatureSerializer)
+    extends SimpleFeatureSerializer with LimitedSerialization {
 
   val reusableFeature = new ScalaSimpleFeature(indexSft, "")
 
@@ -165,7 +161,7 @@ class IndexValueEncoderImpl(copyFeature: (SimpleFeature, SimpleFeature) => Unit,
  */
 @deprecated
 class OldIndexValueEncoder(sft: SimpleFeatureType, encodedSft: SimpleFeatureType, val fields: Seq[String])
-    extends SimpleFeatureSerializer {
+    extends SimpleFeatureSerializer with LimitedSerialization {
 
   import OldIndexValueEncoder._
 

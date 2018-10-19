@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -21,12 +21,14 @@ import org.locationtech.geomesa.curve.{BinnedTime, LegacyZ3SFC}
 import org.locationtech.geomesa.filter._
 import org.locationtech.geomesa.index.conf.QueryProperties
 import org.locationtech.geomesa.index.index.z3.Z3IndexValues
+import org.locationtech.geomesa.index.iterators.StatsScan
 import org.locationtech.geomesa.index.strategies.SpatioTemporalFilterStrategy
-import org.locationtech.geomesa.index.utils.{Explainer, KryoLazyStatsUtils, SplitArrays}
+import org.locationtech.geomesa.index.utils.{Explainer, SplitArrays}
 import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 import org.locationtech.geomesa.utils.geotools._
 import org.locationtech.geomesa.utils.index.VisibilityLevel
 import org.opengis.feature.simple.SimpleFeatureType
+import org.opengis.filter.Filter
 
 trait Z3QueryableIndex extends AccumuloFeatureIndexType
     with SpatioTemporalFilterStrategy[AccumuloDataStore, AccumuloFeature, Mutation]
@@ -42,7 +44,7 @@ trait Z3QueryableIndex extends AccumuloFeatureIndexType
                             hints: Hints,
                             explain: Explainer): AccumuloQueryPlan = {
 
-    import AccumuloFeatureIndex.{BinColumnFamily, FullColumnFamily}
+    import AccumuloColumnGroups.BinColumnFamily
     import Z3IndexV2.GEOM_Z_NUM_BYTES
     import org.locationtech.geomesa.filter.FilterHelper.{extractGeometries, extractIntervals}
     import org.locationtech.geomesa.index.conf.QueryHints.{LOOSE_BBOX, RichHints}
@@ -53,6 +55,8 @@ trait Z3QueryableIndex extends AccumuloFeatureIndexType
     }
 
     if (filter.primary.isEmpty) {
+      // check that full table scans are allowed
+      QueryProperties.BlockFullTableScans.onFullTableScan(sft.getTypeName, filter.filter.getOrElse(Filter.INCLUDE))
       filter.secondary.foreach { f =>
         logger.warn(s"Running full table scan for schema ${sft.getTypeName} with filter ${filterToString(f)}")
       }
@@ -99,29 +103,29 @@ trait Z3QueryableIndex extends AccumuloFeatureIndexType
           (Seq(BinAggregatingIterator.configurePrecomputed(sft, this, ecql, hints, sft.nonPoints)), BinColumnFamily)
         } else {
           val iter = BinAggregatingIterator.configureDynamic(sft, this, ecql, hints, sft.nonPoints)
-          (Seq(iter), FullColumnFamily)
+          (Seq(iter), AccumuloColumnGroups.default)
         }
       (iters, BinAggregatingIterator.kvsToFeatures(), None, cf, false)
     } else if (hints.isDensityQuery) {
       val iter = Z3DensityIterator.configure(sft, this, ecql, hints)
-      (Seq(iter), KryoLazyDensityIterator.kvsToFeatures(), None, FullColumnFamily, false)
+      (Seq(iter), KryoLazyDensityIterator.kvsToFeatures(), None, AccumuloColumnGroups.default, false)
     } else if (hints.isArrowQuery) {
       val (iter, reduce) = ArrowIterator.configure(sft, this, ds.stats, filter.filter, ecql, hints, sft.nonPoints)
-      (Seq(iter), ArrowIterator.kvsToFeatures(), Some(reduce), FullColumnFamily, false)
+      (Seq(iter), ArrowIterator.kvsToFeatures(), Some(reduce), AccumuloColumnGroups.default, false)
     } else if (hints.isStatsQuery) {
       val iter = KryoLazyStatsIterator.configure(sft, this, ecql, hints, sft.nonPoints)
-      val reduce = Some(KryoLazyStatsUtils.reduceFeatures(sft, hints)(_))
-      (Seq(iter), KryoLazyStatsIterator.kvsToFeatures(), reduce, FullColumnFamily, false)
+      val reduce = Some(StatsScan.reduceFeatures(sft, hints)(_))
+      (Seq(iter), KryoLazyStatsIterator.kvsToFeatures(), reduce, AccumuloColumnGroups.default, false)
     } else if (hints.isMapAggregatingQuery) {
       val iter = KryoLazyMapAggregatingIterator.configure(sft, this, ecql, hints, sft.nonPoints)
       val reduce = Some(KryoLazyMapAggregatingIterator.reduceMapAggregationFeatures(hints)(_))
-      (Seq(iter), entriesToFeatures(sft, hints.getReturnSft), reduce, FullColumnFamily, false)
+      (Seq(iter), entriesToFeatures(sft, hints.getReturnSft), reduce, AccumuloColumnGroups.default, false)
     } else {
       val iters = KryoLazyFilterTransformIterator.configure(sft, this, ecql, hints).toSeq
-      (iters, entriesToFeatures(sft, hints.getReturnSft), None, FullColumnFamily, sft.nonPoints)
+      (iters, entriesToFeatures(sft, hints.getReturnSft), None, AccumuloColumnGroups.default, sft.nonPoints)
     }
 
-    val z3table = getTableName(sft.getTypeName, ds)
+    val z3table = getTableNames(sft, ds, None)
     val numThreads = ds.config.queryThreads
 
     val sfc = LegacyZ3SFC(sft.getZ3Interval)
@@ -151,7 +155,11 @@ trait Z3QueryableIndex extends AccumuloFeatureIndexType
         }
       }
 
-      val rangeTarget = QueryProperties.SCAN_RANGES_TARGET.option.map(_.toInt)
+      val rangeTarget = {
+        // note: this will always be Some, as ScanRangesTarget has a default value
+        val opt = QueryProperties.ScanRangesTarget.option
+        if (timesByBin.isEmpty) { opt.map(_.toInt) } else { opt.map(_.toInt / timesByBin.size) }
+      }
       def toZRanges(t: Seq[(Long, Long)]): Seq[(Array[Byte], Array[Byte])] = if (sft.isPoints) {
         sfc.ranges(xy, t, 64, rangeTarget).map(r => (Longs.toByteArray(r.lower), Longs.toByteArray(r.upper)))
       } else {
@@ -191,7 +199,7 @@ trait Z3QueryableIndex extends AccumuloFeatureIndexType
       case VisibilityLevel.Feature   => Seq.empty
       case VisibilityLevel.Attribute => Seq(KryoVisibilityRowEncoder.configure(sft))
     }
-    val cf = if (perAttributeIter.isEmpty) colFamily else AccumuloFeatureIndex.AttributeColumnFamily
+    val cf = if (perAttributeIter.isEmpty) { colFamily } else { AccumuloColumnGroups.AttributeColumnFamily }
 
     val iters = perAttributeIter ++ zIterator.toSeq ++ iterators
     BatchScanPlan(filter, z3table, ranges, iters, Seq(cf), kvsToFeatures, reduce, numThreads, hasDupes)

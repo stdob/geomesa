@@ -5,13 +5,17 @@ Installing from the Binary Distribution
 ---------------------------------------
 
 GeoMesa Lambda artifacts are available for download or can be built from source.
-The easiest way to get started is to download the most recent binary version (``$VERSION`` = |release|)
-and untar it somewhere convenient. For example, to download and prepare the geomesa-lambda binary:
+The easiest way to get started is to download the most recent binary version
+(|release|) from `GitHub`__.
+
+__ https://github.com/locationtech/geomesa/releases
+
+Extract it somewhere convenient:
 
 .. code-block:: bash
 
-    # download and unpackage the most recent distribution
-    $ wget http://repo.locationtech.org/content/repositories/geomesa-releases/org/locationtech/geomesa/geomesa-lambda-dist_2.11/$VERSION/geomesa-lambda-dist_2.11-$VERSION-bin.tar.gz
+    # download and unpackage the most recent distribution:
+    $ wget "https://github.com/locationtech/geomesa/releases/download/geomesa_2.11-$VERSION/geomesa-lambda-dist_2.11-$VERSION-bin.tar.gz"
     $ tar xvf geomesa-lambda-dist_2.11-$VERSION-bin.tar.gz
     $ cd geomesa-lambda-dist_2.11-$VERSION
     $ ls
@@ -47,7 +51,7 @@ GeoMesa comes with a set of command line tools located in ``geomesa-lambda_2.11-
 
 .. note::
 
-    You can configure environment variables and classpath settings in geomesa-lambda_2.11-$VERSION/bin/geomesa-env.sh.
+    You can configure environment variables and classpath settings in geomesa-lambda_2.11-$VERSION/conf/geomesa-env.sh.
 
 In the ``geomesa-lambda_2.11-$VERSION`` directory, run ``bin/geomesa-lambda configure`` to set up the tools.
 
@@ -106,8 +110,9 @@ Installing GeoMesa Lambda in GeoServer
 
 .. warning::
 
-    The GeoMesa Lambda GeoServer plugin requires the use of GeoServer
-    |geoserver_version| and GeoTools |geotools_version|.
+   GeoServer 2.13.0 and 2.13.1 are not recommended due to two serious bugs:
+     * GeoMesa WPS processes are not triggered correctly, and will run slowly or not at all
+     * GeoMesa count optimizations are bypassed, potentially resulting in large duplicate scans for WFS queries
 
 As described in section :ref:`geomesa_and_geoserver`, GeoMesa implements a `GeoTools`_-compatible data store.
 This makes it possible to use GeoMesa as a data store in `GeoServer`_. GeoServer's web site includes
@@ -164,7 +169,7 @@ that match the version of Hadoop you are running.
 
 There are scripts in the ``geomesa-lambda_2.11-$VERSION/bin`` directory
 (``install-hadoop-accumulo.sh``, ``install-kafka.sh``) which will install these dependencies to a target directory
-using ``wget`` (requires an internet connection).
+using ``curl`` (requires an internet connection).
 
 .. note::
 

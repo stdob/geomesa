@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,15 +8,19 @@
 
 package org.locationtech.geomesa.index
 
-import java.util.Comparator
+import java.nio.charset.StandardCharsets
 
+import com.google.common.primitives.UnsignedBytes
 import org.geotools.data.{Query, Transaction}
 import org.geotools.factory.Hints
 import org.locationtech.geomesa.index.TestGeoMesaDataStore.{TestWrappedFeature, TestWrite, _}
 import org.locationtech.geomesa.index.api.{GeoMesaIndexManager, _}
 import org.locationtech.geomesa.index.geotools.GeoMesaDataStoreFactory.GeoMesaDataStoreConfig
-import org.locationtech.geomesa.index.geotools.{GeoMesaAppendFeatureWriter, GeoMesaDataStore, GeoMesaFeatureWriter, GeoMesaModifyFeatureWriter}
+import org.locationtech.geomesa.index.geotools.GeoMesaFeatureWriter.{FeatureWriterFactory, GeoMesaAppendFeatureWriter, GeoMesaModifyFeatureWriter, TableFeatureWriter}
+import org.locationtech.geomesa.index.geotools.{GeoMesaDataStore, GeoMesaFeatureWriter}
 import org.locationtech.geomesa.index.index._
+import org.locationtech.geomesa.index.index.attribute.AttributeIndex
+import org.locationtech.geomesa.index.index.id.IdIndex
 import org.locationtech.geomesa.index.index.legacy.AttributeDateIndex
 import org.locationtech.geomesa.index.index.z2.Z2Index
 import org.locationtech.geomesa.index.index.z3.Z3Index
@@ -25,8 +29,8 @@ import org.locationtech.geomesa.index.stats._
 import org.locationtech.geomesa.index.utils.{Explainer, LocalLocking}
 import org.locationtech.geomesa.utils.audit.{AuditProvider, AuditWriter}
 import org.locationtech.geomesa.utils.collection.{CloseableIterator, SelfClosingIterator}
-import org.locationtech.geomesa.utils.index.IndexMode
 import org.locationtech.geomesa.utils.index.IndexMode.IndexMode
+import org.locationtech.geomesa.utils.index.{ByteArrays, IndexMode}
 import org.locationtech.geomesa.utils.stats.{SeqStat, Stat}
 import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 import org.opengis.filter.Filter
@@ -41,14 +45,10 @@ class TestGeoMesaDataStore(looseBBox: Boolean)
 
   override val manager: TestIndexManager = new TestIndexManager
 
-  override protected def createFeatureWriterAppend(sft: SimpleFeatureType,
-                                                   indices: Option[Seq[TestFeatureIndexType]]): TestFeatureWriterType =
-    new TestAppendFeatureWriter(sft, this, indices)
+  override protected val featureWriterFactory: TestFeatureWriterFactory = new TestFeatureWriterFactory(this)
 
-  override protected def createFeatureWriterModify(sft: SimpleFeatureType,
-                                                   indices: Option[Seq[TestFeatureIndexType]],
-                                                   filter: Filter): TestFeatureWriterType =
-    new TestModifyFeatureWriter(sft, this, indices, filter)
+  override def getQueryPlan(query: Query, index: Option[TestFeatureIndexType], explainer: Explainer): Seq[TestQueryPlan] =
+    super.getQueryPlan(query, index, explainer).asInstanceOf[Seq[TestQueryPlan]]
 
   override def delete(): Unit = throw new NotImplementedError()
 }
@@ -56,28 +56,18 @@ class TestGeoMesaDataStore(looseBBox: Boolean)
 object TestGeoMesaDataStore {
 
   type TestFeatureIndexType = GeoMesaFeatureIndex[TestGeoMesaDataStore, TestWrappedFeature, TestWrite]
+  type TestFeatureWriterFactoryType = FeatureWriterFactory[TestGeoMesaDataStore, TestWrappedFeature, TestWrite]
   type TestFeatureWriterType = GeoMesaFeatureWriter[TestGeoMesaDataStore, TestWrappedFeature, TestWrite, TestFeatureIndex]
+  type TestTableFeatureWriterType = TableFeatureWriter[TestGeoMesaDataStore, TestWrappedFeature, TestWrite, TestFeatureIndex]
   type TestAppendFeatureWriterType = GeoMesaAppendFeatureWriter[TestGeoMesaDataStore, TestWrappedFeature, TestWrite, TestFeatureIndex]
   type TestModifyFeatureWriterType = GeoMesaModifyFeatureWriter[TestGeoMesaDataStore, TestWrappedFeature, TestWrite, TestFeatureIndex]
   type TestIndexManagerType = GeoMesaIndexManager[TestGeoMesaDataStore, TestWrappedFeature, TestWrite]
   type TestQueryPlanType = QueryPlan[TestGeoMesaDataStore, TestWrappedFeature, TestWrite]
   type TestFilterStrategyType = FilterStrategy[TestGeoMesaDataStore, TestWrappedFeature, TestWrite]
 
-  val byteComparator = new Comparator[Array[Byte]] {
-    override def compare(o1: Array[Byte], o2: Array[Byte]): Int = {
-      val minLength = if (o1.length < o2.length) { o1.length } else { o2.length }
-      var i = 0
-      while (i < minLength) {
-        if (o1(i) != o2(i)) {
-          return (o1(i) & 0xff) - (o2(i) & 0xff)
-        }
-        i += 1
-      }
-      o1.length - o2.length
-    }
+  case class TestWrappedFeature(feature: SimpleFeature) extends WrappedFeature {
+    override lazy val idBytes: Array[Byte] = feature.getID.getBytes(StandardCharsets.UTF_8)
   }
-
-  case class TestWrappedFeature(feature: SimpleFeature) extends WrappedFeature
 
   case class TestWrite(row: Array[Byte], feature: SimpleFeature, delete: Boolean = false)
 
@@ -103,8 +93,10 @@ object TestGeoMesaDataStore {
     override val AllIndices: Seq[TestFeatureIndex] = CurrentIndices :+ new TestAttributeDateIndex
     override def lookup: Map[(String, Int), TestFeatureIndex] =
       super.lookup.asInstanceOf[Map[(String, Int), TestFeatureIndex]]
-    override def indices(sft: SimpleFeatureType, mode: IndexMode): Seq[TestFeatureIndex] =
-      super.indices(sft, mode).asInstanceOf[Seq[TestFeatureIndex]]
+    override def indices(sft: SimpleFeatureType,
+                         idx: Option[String] = None,
+                         mode: IndexMode = IndexMode.Any): Seq[TestFeatureIndex] =
+      super.indices(sft, idx, mode).asInstanceOf[Seq[TestFeatureIndex]]
     override def index(identifier: String): TestFeatureIndex = super.index(identifier).asInstanceOf[TestFeatureIndex]
   }
 
@@ -130,14 +122,17 @@ object TestGeoMesaDataStore {
 
     private val ordering = new Ordering[(Array[Byte], SimpleFeature)] {
       override def compare(x: (Array[Byte], SimpleFeature), y: (Array[Byte], SimpleFeature)): Int =
-        byteComparator.compare(x._1, y._1)
+        ByteArrays.ByteOrdering.compare(x._1, y._1)
     }
 
     val features = scala.collection.mutable.SortedSet.empty[(Array[Byte], SimpleFeature)](ordering)
 
     override val version = 1
 
-    override def delete(sft: SimpleFeatureType, ds: TestGeoMesaDataStore, shared: Boolean): Unit = features.clear()
+    override def removeAll(sft: SimpleFeatureType, ds: TestGeoMesaDataStore): Unit = features.clear()
+
+    override def delete(sft: SimpleFeatureType, ds: TestGeoMesaDataStore, partition: Option[String]): Unit =
+      features.clear()
 
     override protected def createInsert(row: Array[Byte], feature: TestWrappedFeature): TestWrite =
       TestWrite(row, feature.feature)
@@ -145,9 +140,9 @@ object TestGeoMesaDataStore {
     override protected def createDelete(row: Array[Byte], feature: TestWrappedFeature): TestWrite =
       TestWrite(row, feature.feature, delete = true)
 
-    override protected def range(start: Array[Byte], end: Array[Byte]): TestRange = TestRange(start, end)
+    override protected def createRange(start: Array[Byte], end: Array[Byte]): TestRange = TestRange(start, end)
 
-    override protected def rangeExact(row: Array[Byte]): TestRange = TestRange(row, IndexAdapter.rowFollowingRow(row))
+    override protected def createRange(row: Array[Byte]): TestRange = TestRange(row, ByteArrays.rowFollowingRow(row))
 
     override protected def scanConfig(sft: SimpleFeatureType,
                                       ds: TestGeoMesaDataStore,
@@ -159,26 +154,35 @@ object TestGeoMesaDataStore {
     override protected def scanPlan(sft: SimpleFeatureType,
                                     ds: TestGeoMesaDataStore,
                                     filter: TestFilterStrategyType,
-                                    config: TestScanConfig): TestQueryPlanType = TestQueryPlan(this, filter, config.ranges, config.ecql)
+                                    config: TestScanConfig): TestQueryPlanType =
+      TestQueryPlan(this, filter, config.ranges, config.ecql)
 
     override def toString: String = getClass.getSimpleName
   }
 
-  class TestAppendFeatureWriter(sft: SimpleFeatureType,
-                                ds: TestGeoMesaDataStore,
-                                indices: Option[Seq[TestFeatureIndexType]])
-      extends TestFeatureWriterType(sft, ds, indices) with TestAppendFeatureWriterType with TestFeatureWriter
+  class TestFeatureWriterFactory(ds: TestGeoMesaDataStore) extends TestFeatureWriterFactoryType {
+    override def createFeatureWriter(sft: SimpleFeatureType,
+                                     indices: Seq[TestFeatureIndexType],
+                                     filter: Option[Filter]): FlushableFeatureWriter = {
+      filter match {
+        case None =>
+          new TestFeatureWriter(sft, ds, indices, null)
+              with TestTableFeatureWriterType with TestAppendFeatureWriterType
 
-  class TestModifyFeatureWriter(sft: SimpleFeatureType,
-                                ds: TestGeoMesaDataStore,
-                                indices: Option[Seq[TestFeatureIndexType]],
-                                val filter: Filter)
-      extends TestFeatureWriterType(sft, ds, indices) with TestModifyFeatureWriterType with TestFeatureWriter
+        case Some(f) =>
+          new TestFeatureWriter(sft, ds, indices, f)
+            with TestTableFeatureWriterType with TestModifyFeatureWriterType
+      }
+    }
+  }
 
-  trait TestFeatureWriter extends TestFeatureWriterType {
+  abstract class TestFeatureWriter(val sft: SimpleFeatureType,
+                                   val ds: TestGeoMesaDataStore,
+                                   val indices: Seq[TestFeatureIndexType],
+                                   val filter: Filter) extends TestFeatureWriterType {
 
-    override protected def createMutators(tables: IndexedSeq[String]): IndexedSeq[TestFeatureIndex] =
-      tables.map(t => ds.manager.indices(sft, IndexMode.Write).find(_.getTableName(sft.getTypeName, ds) == t).orNull)
+    override protected def createMutator(table: String): TestFeatureIndex =
+      ds.manager.indices(sft, mode = IndexMode.Write).find(_.getTableNames(sft, ds, None).contains(table)).orNull
 
     override protected def executeWrite(mutator: TestFeatureIndex, writes: Seq[TestWrite]): Unit = {
       writes.foreach { case TestWrite(row, feature, _) => mutator.features.add((row, feature)) }
@@ -188,6 +192,9 @@ object TestGeoMesaDataStore {
       removes.foreach { case TestWrite(row, feature, _) => mutator.features.remove((row, feature)) }
 
     override def wrapFeature(feature: SimpleFeature): TestWrappedFeature = TestWrappedFeature(feature)
+
+    override def flush(): Unit = {}
+    override def close(): Unit = {}
   }
 
   case class TestQueryPlan(index: TestFeatureIndex,
@@ -196,14 +203,16 @@ object TestGeoMesaDataStore {
                            ecql: Option[Filter]) extends TestQueryPlanType {
     override def scan(ds: TestGeoMesaDataStore): CloseableIterator[SimpleFeature] = {
       def contained(range: TestRange, row: Array[Byte]): Boolean =
-        byteComparator.compare(range.start, row) <= 0 && byteComparator.compare(range.end, row) > 0
+        ByteArrays.ByteOrdering.compare(range.start, row) <= 0 && ByteArrays.ByteOrdering.compare(range.end, row) > 0
       index.features.toIterator.collect {
         case (row, sf) if ranges.exists(contained(_, row)) && ecql.forall(_.evaluate(sf)) => sf
       }
     }
 
     override def explain(explainer: Explainer, prefix: String): Unit = {
-      explainer(s"ranges (${ranges.length}): ${ranges.take(5).map(r => s"[${r.start.mkString("")}:${r.end.mkString("")})")}")
+      explainer(s"ranges (${ranges.length}): ${ranges.take(5).map(r =>
+        s"[${r.start.map(UnsignedBytes.toString).mkString(";")}:" +
+        s"${r.end.map(UnsignedBytes.toString).mkString(";")})").mkString(",")}")
       explainer(s"ecql: ${ecql.map(org.locationtech.geomesa.filter.filterToString).getOrElse("INCLUDE")}")
     }
   }

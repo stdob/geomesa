@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,43 +8,70 @@
 
 package org.locationtech.geomesa.utils.geotools
 
+import com.typesafe.scalalogging.LazyLogging
 import com.vividsolutions.jts.geom._
 import org.geotools.geometry.jts.JTSFactoryFinder
 import org.geotools.referencing.GeodeticCalculator
+import org.locationtech.geomesa.utils.geohash.GeohashUtils
+import org.locationtech.geomesa.utils.geohash.GeohashUtils.ResolutionRange
+
+import scala.util.control.NonFatal
 
 /**
  * The object provides convenience methods for common operations on geometries.
  */
-object GeometryUtils {
+object GeometryUtils extends LazyLogging {
 
-  val geoFactory = JTSFactoryFinder.getGeometryFactory
+  val geoFactory: GeometryFactory = JTSFactoryFinder.getGeometryFactory
 
-  val zeroPoint = geoFactory.createPoint(new Coordinate(0,0))
+  val zeroPoint: Point = geoFactory.createPoint(new Coordinate(0,0))
 
-  /** Convert meters to dec degrees based on widest point in dec degrees of circles at bounding box corners */
-  def distanceDegrees(geometry: Geometry, meters: Double): Double = {
-    geometry match {
-      case p: Point => geometry.distance(farthestPoint(p, meters))
-      case _ => distanceDegrees(geometry.getEnvelopeInternal, meters)
+  /**
+    * Convert meters to decimal degrees, based on the latitude of the geometry.
+    *
+    * Returns two values, ones based on latitude and one based on longitude. The first value
+    * will always be &lt;= the second value
+    *
+    * For non-point geometries, distances are measured from the corners of the geometry envelope
+    *
+    * @param geom geometry to buffer
+    * @param meters meters
+    * @return (min degrees, max degrees)
+    */
+  def distanceDegrees(geom: Geometry, meters: Double): (Double, Double) = {
+    geom match {
+      case p: Point => distanceDegrees(p, meters)
+      case _        => distanceDegrees(geom.getEnvelopeInternal, meters)
     }
   }
 
-  /** Convert meters to dec degrees based on widest point in dec degrees of circles at envelope corners */
-  def distanceDegrees(env: Envelope, meters: Double): Double =
-    List(
+  private def distanceDegrees(point: Point, meters: Double): (Double, Double) = {
+    val calc = new GeodeticCalculator()
+    calc.setStartingGeographicPoint(point.getX, point.getY)
+    val north = {
+      calc.setDirection(0, meters)
+      val dest2D = calc.getDestinationGeographicPoint
+      point.distance(geoFactory.createPoint(new Coordinate(dest2D.getX, dest2D.getY)))
+    }
+    val east = {
+      calc.setDirection(90, meters)
+      val dest2D = calc.getDestinationGeographicPoint
+      point.distance(geoFactory.createPoint(new Coordinate(dest2D.getX, dest2D.getY)))
+    }
+    // normally east would be the largest in degrees, but sometimes it can be smaller
+    // due to variances in the ellipsoid
+    if (east > north) { (north, east) } else { (east, north) }
+  }
+
+  private def distanceDegrees(env: Envelope, meters: Double): (Double, Double) = {
+    val distances = Seq(
       distanceDegrees(geoFactory.createPoint(new Coordinate(env.getMaxX, env.getMaxY)), meters),
       distanceDegrees(geoFactory.createPoint(new Coordinate(env.getMaxX, env.getMinY)), meters),
       distanceDegrees(geoFactory.createPoint(new Coordinate(env.getMinX, env.getMinY)), meters),
       distanceDegrees(geoFactory.createPoint(new Coordinate(env.getMinX, env.getMaxY)), meters)
-    ).max
+    )
 
-  /** Farthest point based on widest point in dec degrees of circle */
-  def farthestPoint(startPoint: Point, meters: Double) = {
-    val calc = new GeodeticCalculator()
-    calc.setStartingGeographicPoint(startPoint.getX, startPoint.getY)
-    calc.setDirection(90, meters)
-    val dest2D = calc.getDestinationGeographicPoint
-    geoFactory.createPoint(new Coordinate(dest2D.getX, dest2D.getY))
+    (distances.minBy(_._1)._1, distances.maxBy(_._2)._2)
   }
 
   def unfoldRight[A, B](seed: B)(f: B => Option[(A, B)]): List[A] = f(seed) match {
@@ -78,6 +105,32 @@ object GeometryUtils {
   }
 
   /**
+    * Returns the rough bounds of a geometry, decomposing the geometry to provide better accuracy
+    *
+    * @param geometry geometry
+    * @param maxBounds maximum number of bounds that will be returned
+    * @param maxBitResolution maximum bit resolution to decompose to
+    *                         must be between 1-63, inclusive
+    * @return seq of (xmin, ymin, xmax, ymax)
+    */
+  def bounds(geometry: Geometry, maxBounds: Int, maxBitResolution: Int): Seq[(Double, Double, Double, Double)] = {
+    if (maxBounds < 2 || GeometryUtils.isRectangular(geometry)) {
+      return Seq(bounds(geometry))
+    }
+
+    try {
+      // use `maxBitResolution | 1` to ensure oddness, which is required by GeohashUtils
+      val resolution = ResolutionRange(0, maxBitResolution | 1, 5)
+      val geohashes = GeohashUtils.decomposeGeometry(geometry, maxBounds, resolution, relaxFit = true)
+      geohashes.map(gh => (gh.bbox.ll.getX, gh.bbox.ll.getY, gh.bbox.ur.getX, gh.bbox.ur.getY))
+    } catch {
+      case NonFatal(e) =>
+        logger.error("Error decomposing geometry, falling back to envelope bounds:", e)
+        Seq(bounds(geometry))
+    }
+  }
+
+  /**
     * Evaluates the complexity of a geometry. Will return true if the geometry is a point or
     * a rectangular polygon without interior holes.
     *
@@ -86,25 +139,43 @@ object GeometryUtils {
     */
   def isRectangular(geometry: Geometry): Boolean = geometry match {
     case _: Point   => true
-    case p: Polygon => noInteriorRings(p) && noCutouts(p) && allRightAngles(p)
+    case p: Polygon => isRectangular(p)
     case _ => false
   }
 
-  // checks that there are no interior holes
-  private def noInteriorRings(p: Polygon): Boolean = p.getNumInteriorRing == 0
-
-  // checks that all points are on the exterior envelope of the polygon
-  private def noCutouts(p: Polygon): Boolean = {
-    val (xmin, ymin, xmax, ymax) = {
+  /**
+    * Checks that a polygon is rectangular and has no interior holes
+    *
+    * @param p polygon
+    * @return
+    */
+  def isRectangular(p: Polygon): Boolean = {
+    if (p.isEmpty) {
+      true
+    } else if (p.getNumInteriorRing != 0) {
+      // checks that there are no interior holes
+      false
+    } else {
       val env = p.getEnvelopeInternal
-      (env.getMinX, env.getMinY, env.getMaxX, env.getMaxY)
-    }
-    p.getCoordinates.forall(c => c.x == xmin || c.x == xmax || c.y == ymin || c.y == ymax)
-  }
+      val (xmin, ymin, xmax, ymax) = (env.getMinX, env.getMinY, env.getMaxX, env.getMaxY)
 
-  // checks that there aren't any angled lines
-  private def allRightAngles(p: Polygon): Boolean =
-    p.getCoordinates.sliding(2).forall { case Array(left, right) => left.x == right.x || left.y == right.y }
+      // checks that all points are on the exterior envelope of the polygon
+      def cutout(c: Coordinate): Boolean = c.x != xmin && c.x != xmax && c.y != ymin && c.y != ymax
+
+      val coords = p.getCoordinates // note: getCoordinates constructs an array so just call once
+      var i = 1
+      while (i < coords.length) {
+        val c = coords(i)
+        // checks that there aren't any cutouts or angled lines
+        if (cutout(c) || (c.x != coords(i - 1).x && c.y != coords(i - 1).y)) {
+          return false
+        }
+        i += 1
+      }
+      // check final coord cutout
+      !cutout(coords(0))
+    }
+  }
 
   /**
     * This function checks if a segment crosses the IDL.
@@ -139,8 +210,8 @@ object GeometryUtils {
     * @return a double representing the intercept latitude
     */
   def calcCrossLat(point1: Coordinate, point2: Coordinate, crossLon: Double): Double = {
-    val slope = (point1.y - point2.y) / (point1.x - point2.x);
-    val intercept = point1.y - (slope * point1.x);
-    (slope * crossLon) + intercept;
+    val slope = (point1.y - point2.y) / (point1.x - point2.x)
+    val intercept = point1.y - (slope * point1.x)
+    (slope * crossLon) + intercept
   }
 }

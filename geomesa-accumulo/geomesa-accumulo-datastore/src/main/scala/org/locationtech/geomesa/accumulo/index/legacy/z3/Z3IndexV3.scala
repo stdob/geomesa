@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -40,7 +40,7 @@ case object Z3IndexV3 extends AccumuloFeatureIndex with Z3WritableIndex with Z3Q
     sft.getDtgField.isDefined && sft.isPoints
   }
 
-  override def getSplits(sft: SimpleFeatureType): Seq[Array[Byte]] = {
+  override def getSplits(sft: SimpleFeatureType, partition: Option[String]): Seq[Array[Byte]] = {
     import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
     SplitArrays.apply(sft.getZShards)
   }

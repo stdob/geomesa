@@ -38,15 +38,19 @@ Installing from the Binary Distribution
 ---------------------------------------
 
 GeoMesa Cassandra artifacts are available for download or can be built from source.
-The easiest way to get started is to download the most recent binary version (``$VERSION`` = |release|)
-and untar it somewhere convenient:
+The easiest way to get started is to download the most recent binary version
+(|release|) from `GitHub`__.
+
+__ https://github.com/locationtech/geomesa/releases
+
+Extract it somewhere convenient:
 
 .. code-block:: bash
 
-    # download and unpackage the most recent distribution
-    $ wget http://repo.locationtech.org/content/repositories/geomesa-releases/org/locationtech/geomesa/geomesa-cassandra-dist_2.11/$VERSION/geomesa-cassandra-dist_2.11-$VERSION-bin.tar.gz
-    $ tar xvf geomesa-cassandra.11-$VERSION-bin.tar.gz
-    $ cd geomesa-cassandra-dist_2.11-$VERSION
+    # download and unpackage the most recent distribution:
+    $ wget "https://github.com/locationtech/geomesa/releases/download/geomesa_2.11-$VERSION/geomesa-cassandra_2.11-$VERSION-bin.tar.gz"
+    $ tar xvf geomesa-cassandra_2.11-$VERSION-bin.tar.gz
+    $ cd geomesa-cassandra_2.11-$VERSION
     $ ls
     bin/  conf/  dist/  docs/  examples/  lib/  LICENSE.txt  logs/
 
@@ -111,6 +115,12 @@ Run ``geomesa-cassandra`` without arguments to confirm that the tools work.
 
 Installing GeoMesa Cassandra in GeoServer
 -----------------------------------------
+
+.. warning::
+
+   GeoServer 2.13.0 and 2.13.1 are not recommended due to two serious bugs:
+     * GeoMesa WPS processes are not triggered correctly, and will run slowly or not at all
+     * GeoMesa count optimizations are bypassed, potentially resulting in large duplicate scans for WFS queries
 
 The GeoMesa Cassandra distribution includes a GeoServer plugin for including
 Cassandra data stores in GeoServer. The plugin files are in the

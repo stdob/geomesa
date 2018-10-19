@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -14,7 +14,6 @@ import com.typesafe.scalalogging.LazyLogging
 import org.apache.accumulo.core.client.Connector
 import org.apache.hadoop.conf.Configuration
 import org.geotools.data.Query
-import org.locationtech.geomesa.accumulo.AccumuloProperties.AccumuloQueryProperties
 import org.locationtech.geomesa.accumulo.data.AccumuloDataStore
 import org.locationtech.geomesa.accumulo.index.{AccumuloQueryPlan, _}
 import org.locationtech.geomesa.filter._
@@ -30,7 +29,7 @@ import scala.util.Try
 object AccumuloJobUtils extends LazyLogging {
 
   // default jars that will be included with m/r jobs
-  lazy val defaultLibJars = {
+  lazy val defaultLibJars: List[String] = {
     val defaultLibJarsFile = "org/locationtech/geomesa/jobs/accumulo-libjars.list"
     val url = Try(getClass.getClassLoader.getResource(defaultLibJarsFile))
     val source = url.map(Source.fromURL)
@@ -62,15 +61,13 @@ object AccumuloJobUtils extends LazyLogging {
    * Gets a query plan that can be satisfied via AccumuloInputFormat - e.g. only 1 table and configuration.
    */
   def getSingleQueryPlan(ds: AccumuloDataStore, query: Query): AccumuloQueryPlan = {
-    // disable range batching for this request
-    AccumuloQueryProperties.SCAN_BATCH_RANGES.threadLocalValue.set(Int.MaxValue.toString)
     // disable join plans
     AttributeIndex.AllowJoinPlans.set(false)
 
     try {
       lazy val fallbackIndex = {
         val schema = ds.getSchema(query.getTypeName)
-        AccumuloFeatureIndex.indices(schema, IndexMode.Read).headOption.getOrElse {
+        AccumuloFeatureIndex.indices(schema, mode = IndexMode.Read).headOption.getOrElse {
           throw new IllegalStateException(s"Schema '${schema.getTypeName}' does not have any readable indices")
         }
       }
@@ -79,23 +76,28 @@ object AccumuloJobUtils extends LazyLogging {
 
       if (queryPlans.isEmpty) {
         EmptyPlan(FilterStrategy(fallbackIndex, None, Some(Filter.EXCLUDE)))
-      } else if (queryPlans.length > 1) {
+      } else if (queryPlans.lengthCompare(1) > 0) {
         // this query requires multiple scans, which we can't execute from some input formats
         // instead, fall back to a full table scan
         logger.warn("Desired query plan requires multiple scans - falling back to full table scan")
         val qps = ds.getQueryPlan(query, Some(fallbackIndex))
-        if (qps.length > 1) {
+        if (qps.lengthCompare(1) > 0 || qps.exists(_.tables.lengthCompare(1) > 0)) {
           logger.error("The query being executed requires multiple scans, which is not currently " +
               "supported by GeoMesa. Your result set will be partially incomplete. " +
               s"Query: ${filterToString(query.getFilter)}")
         }
         qps.head
       } else {
-        queryPlans.head
+        val qp = queryPlans.head
+        if (qp.tables.lengthCompare(1) > 0) {
+          logger.error("The query being executed requires multiple scans, which is not currently " +
+              "supported by GeoMesa. Your result set will be partially incomplete. " +
+              s"Query: ${filterToString(query.getFilter)}")
+        }
+        qp
       }
     } finally {
       // make sure we reset the thread locals
-      AccumuloQueryProperties.SCAN_BATCH_RANGES.threadLocalValue.remove()
       AttributeIndex.AllowJoinPlans.remove()
     }
   }
@@ -106,15 +108,13 @@ object AccumuloJobUtils extends LazyLogging {
     * that's groovy.
     */
   def getMultipleQueryPlan(ds: AccumuloDataStore, query: Query): Seq[AccumuloQueryPlan] = {
-    // disable range batching for this request
-    AccumuloQueryProperties.SCAN_BATCH_RANGES.threadLocalValue.set(Int.MaxValue.toString)
     // disable join plans
     AttributeIndex.AllowJoinPlans.set(false)
 
     try {
       lazy val fallbackIndex = {
         val schema = ds.getSchema(query.getTypeName)
-        AccumuloFeatureIndex.indices(schema, IndexMode.Read).headOption.getOrElse {
+        AccumuloFeatureIndex.indices(schema, mode = IndexMode.Read).headOption.getOrElse {
           throw new IllegalStateException(s"Schema '${schema.getTypeName}' does not have any readable indices")
         }
       }
@@ -127,7 +127,6 @@ object AccumuloJobUtils extends LazyLogging {
       }
     } finally {
       // make sure we reset the thread locals
-      AccumuloQueryProperties.SCAN_BATCH_RANGES.threadLocalValue.remove()
       AttributeIndex.AllowJoinPlans.remove()
     }
   }

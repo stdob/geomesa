@@ -7,29 +7,29 @@ User Manual
    :numbered:
 
    introduction
-   architecture
-   getting_started
    download
    install
+   getting_started
+   architecture
    datastores/index
-   accumulo/index
+   cli/index
+   geoserver
+   spark/index
    hbase/index
+   accumulo/index
    bigtable/index
    cassandra/index
    kafka/index
-   lambda/index
    filesystem/index
-   geoserver
-   blobstore
+   kudu/index
+   lambda/index
    convert/index
-   geojson
-   metrics
-   native_api
-   nifi
    process
-   spark/index
+   geojson
+   nifi
+   blobstore
+   native_api
    stream
-   web_data
    upgrade
 
 Appendix
@@ -39,3 +39,6 @@ Appendix
    :maxdepth: 2
 
    appendix/utils
+   appendix/memory
+   appendix/metrics
+   appendix/web_data

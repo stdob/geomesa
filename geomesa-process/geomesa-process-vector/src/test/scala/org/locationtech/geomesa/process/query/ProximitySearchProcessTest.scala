@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -11,7 +11,7 @@ package org.locationtech.geomesa.process.query
 import com.vividsolutions.jts.geom.{Coordinate, Point}
 import org.geotools.data.collection.ListFeatureCollection
 import org.geotools.geometry.jts.JTSFactoryFinder
-import org.joda.time.{DateTime, DateTimeZone}
+import org.geotools.referencing.GeodeticCalculator
 import org.junit.runner.RunWith
 import org.locationtech.geomesa.features.ScalaSimpleFeature
 import org.locationtech.geomesa.utils.collection.SelfClosingIterator
@@ -25,8 +25,13 @@ class ProximitySearchProcessTest extends Specification {
 
   val geoFactory = JTSFactoryFinder.getGeometryFactory
 
-  def getPoint(lat: Double, lon: Double, meters: Double): Point =
-    GeometryUtils.farthestPoint(geoFactory.createPoint(new Coordinate(lat, lon)), meters)
+  def getPoint(lat: Double, lon: Double, meters: Double): Point = {
+    val calc = new GeodeticCalculator()
+    calc.setStartingGeographicPoint(lat, lon)
+    calc.setDirection(90, meters)
+    val dest2D = calc.getDestinationGeographicPoint
+    geoFactory.createPoint(new Coordinate(dest2D.getX, dest2D.getY))
+  }
 
   "ProximitySearchProcess" should {
     "manually visit a feature collection" in {
@@ -41,7 +46,7 @@ class ProximitySearchProcessTest extends Specification {
         List(1, 2, 3, 4).zip(List(45, 46, 47, 48)).foreach { case (i, lat) =>
           val sf = new ScalaSimpleFeature(sft, name + i)
           sf.setDefaultGeometry(WKTUtils.read(f"POINT($lat%d $lat%d)"))
-          sf.setAttribute("dtg", new DateTime("2011-01-01T00:00:00Z", DateTimeZone.UTC).toDate)
+          sf.setAttribute("dtg", "2011-01-01T00:00:00Z")
           sf.setAttribute("type", name)
           dataFeatures.add(sf)
         }
@@ -60,7 +65,7 @@ class ProximitySearchProcessTest extends Specification {
       List(1, 2, 3).zip(List(p1, p2, p3)).foreach { case (i, p) =>
         val sf = new ScalaSimpleFeature(sft, i.toString)
         sf.setDefaultGeometry(p)
-        sf.setAttribute("dtg", new DateTime("2011-01-01T00:00:00Z", DateTimeZone.UTC).toDate)
+        sf.setAttribute("dtg", "2011-01-01T00:00:00Z")
         sf.setAttribute("type", "fake")
         inputFeatures.add(sf)
       }
@@ -68,7 +73,7 @@ class ProximitySearchProcessTest extends Specification {
       val prox = new ProximitySearchProcess
 
       // note: size returns an estimated amount, instead we need to actually count the features
-      def ex(p: Double) = SelfClosingIterator(prox.execute(inputFeatures, dataFeatures, p))
+      def ex(p: Double) = SelfClosingIterator(prox.execute(inputFeatures, dataFeatures, p)).toSeq
 
       ex(50.0)  must haveLength(0)
       ex(90.0)  must haveLength(0)

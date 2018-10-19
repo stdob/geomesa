@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -28,10 +28,6 @@ import org.opengis.filter.expression.PropertyName
 trait ClientSideFiltering[R] {
 
   this: GeoMesaFeatureIndex[_, _, _] =>
-
-  type EVALFEATURE = R => SimpleFeature
-  type EVALFEATUREOPTION = R => Option[SimpleFeature]
-
 
   /**
     * Get row and value bytes from a scan result
@@ -88,14 +84,13 @@ trait ClientSideFiltering[R] {
     * @param sft simple feature type
     * @return
     */
-  def toFeaturesDirect(sft: SimpleFeatureType): EVALFEATURE = {
+  def toFeaturesDirect(sft: SimpleFeatureType): (R) => SimpleFeature = {
     val getId = getIdFromRow(sft)
     val deserializer = KryoFeatureSerializer(sft, SerializationOptions.withoutId)
     (result) => {
       val RowAndValue(row, rowOffset, rowLength, value, valueOffset, valueLength) = rowAndValue(result)
       val sf = deserializer.deserialize(value, valueOffset, valueLength)
-      val id = getId(row, rowOffset, rowLength)
-      sf.getIdentifier.asInstanceOf[FeatureIdImpl].setID(id)
+      sf.getIdentifier.asInstanceOf[FeatureIdImpl].setID(getId(row, rowOffset, rowLength, sf))
       sf
     }
   }
@@ -107,14 +102,13 @@ trait ClientSideFiltering[R] {
     * @param ecql filter
     * @return
     */
-  def toFeaturesWithFilter(sft: SimpleFeatureType, ecql: Filter): EVALFEATUREOPTION = {
+  def toFeaturesWithFilter(sft: SimpleFeatureType, ecql: Filter): (R) => Option[SimpleFeature] = {
     val getId = getIdFromRow(sft)
     val deserializer = KryoFeatureSerializer(sft, SerializationOptions.withoutId)
     (result) => {
       val RowAndValue(row, rowOffset, rowLength, value, valueOffset, valueLength) = rowAndValue(result)
       val sf = deserializer.deserialize(value, valueOffset, valueLength)
-      val id = getId(row, rowOffset, rowLength)
-      sf.getIdentifier.asInstanceOf[FeatureIdImpl].setID(id)
+      sf.getIdentifier.asInstanceOf[FeatureIdImpl].setID(getId(row, rowOffset, rowLength, sf))
       Some(sf).filter(ecql.evaluate)
     }
   }
@@ -131,15 +125,15 @@ trait ClientSideFiltering[R] {
   def toFeaturesWithTransform(sft: SimpleFeatureType,
                               transforms: Array[Definition],
                               indices: Array[Int],
-                              transformSft: SimpleFeatureType): EVALFEATURE = {
+                              transformSft: SimpleFeatureType): (R) => SimpleFeature = {
     val getId = getIdFromRow(sft)
     if (indices.contains(-1)) {
       // need to evaluate the expressions against the original feature
       val reusableSf = KryoFeatureSerializer(sft, SerializationOptions.withoutId).getReusableFeature
       (result) => {
         val RowAndValue(row, rowOffset, rowLength, value, valueOffset, valueLength) = rowAndValue(result)
-        val id = getId(row, rowOffset, rowLength)
         reusableSf.setBuffer(value, valueOffset, valueLength)
+        val id = getId(row, rowOffset, rowLength, reusableSf)
         reusableSf.setId(id)
         val values = transforms.map(_.expression.evaluate(reusableSf))
         new ScalaSimpleFeature(transformSft, id, values)
@@ -150,8 +144,7 @@ trait ClientSideFiltering[R] {
       (result) => {
         val RowAndValue(row, rowOffset, rowLength, value, valueOffset, valueLength) = rowAndValue(result)
         val sf = deserializer.deserialize(value, valueOffset, valueLength)
-        val id = getId(row, rowOffset, rowLength)
-        sf.getIdentifier.asInstanceOf[FeatureIdImpl].setID(id)
+        sf.getIdentifier.asInstanceOf[FeatureIdImpl].setID(getId(row, rowOffset, rowLength, sf))
         sf
       }
     }
@@ -168,10 +161,10 @@ trait ClientSideFiltering[R] {
     * @return
     */
   def toFeaturesWithFilterTransform(sft: SimpleFeatureType,
-                                            ecql: Filter,
-                                            transforms: Array[Definition],
-                                            indices: Array[Int],
-                                            transformSft: SimpleFeatureType): EVALFEATUREOPTION = {
+                                    ecql: Filter,
+                                    transforms: Array[Definition],
+                                    indices: Array[Int],
+                                    transformSft: SimpleFeatureType): (R) => Option[SimpleFeature] = {
     val getId = getIdFromRow(sft)
     if (indices.contains(-1)) {
       // need to evaluate the expressions against the original feature
@@ -180,7 +173,7 @@ trait ClientSideFiltering[R] {
       (result) => {
         val RowAndValue(row, rowOffset, rowLength, value, valueOffset, valueLength) = rowAndValue(result)
         val sf = deserializer.deserialize(value, valueOffset, valueLength)
-        val id = getId(row, rowOffset, rowLength)
+        val id = getId(row, rowOffset, rowLength, sf)
         sf.getIdentifier.asInstanceOf[FeatureIdImpl].setID(id)
         if (ecql.evaluate(sf)) {
           val values = transforms.map(_.expression.evaluate(sf))
@@ -194,8 +187,8 @@ trait ClientSideFiltering[R] {
       val reusableSf = KryoFeatureSerializer(sft, SerializationOptions.withoutId).getReusableFeature
       (result) => {
         val RowAndValue(row, rowOffset, rowLength, value, valueOffset, valueLength) = rowAndValue(result)
-        val id = getId(row, rowOffset, rowLength)
         reusableSf.setBuffer(value, valueOffset, valueLength)
+        val id = getId(row, rowOffset, rowLength, reusableSf)
         reusableSf.setId(id)
         if (ecql.evaluate(reusableSf)) {
           val values = indices.map(reusableSf.getAttribute)

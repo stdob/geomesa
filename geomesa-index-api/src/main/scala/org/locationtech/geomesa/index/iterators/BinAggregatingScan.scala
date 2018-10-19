@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -33,10 +33,10 @@ trait BinAggregatingScan extends AggregatingScan[ByteBufferResult] {
   override protected def initResult(sft: SimpleFeatureType,
                                     transform: Option[SimpleFeatureType],
                                     options: Map[String, String]): ByteBufferResult = {
-    val geom = options.get(GeomOpt).map(_.toInt)
-    val dtg = options.get(DateOpt).map(_.toInt)
+    val geom = options.get(GeomOpt).map(_.toInt).filter(_ != -1)
+    val dtg = options.get(DateOpt).map(_.toInt).filter(_ != -1)
     val track = options.get(TrackOpt).map(_.toInt).filter(_ != -1)
-    val label = options.get(LabelOpt).map(_.toInt)
+    val label = options.get(LabelOpt).map(_.toInt).filter(_ != -1)
 
     encoding = EncodingOptions(geom, dtg, track, label)
     encoder = BinaryOutputEncoder(sft, encoding)
@@ -83,6 +83,9 @@ trait BinAggregatingScan extends AggregatingScan[ByteBufferResult] {
 
 object BinAggregatingScan {
 
+  import org.locationtech.geomesa.index.conf.QueryHints.RichHints
+  import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
+
   object Configuration {
     // configuration keys
     val BatchSizeOpt  = "batch"
@@ -106,10 +109,7 @@ object BinAggregatingScan {
                 hints: Hints): Map[String, String] = {
     import AggregatingScan.{OptionToConfig, StringToConfig}
     import Configuration._
-    import org.locationtech.geomesa.index.conf.QueryHints.RichHints
     import org.locationtech.geomesa.utils.geotools.RichAttributeDescriptors.RichAttributeDescriptor
-    import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
-
 
     val dtgIndex = dtg.map(sft.indexOf).getOrElse(-1)
     val setDateArrayOpt: Option[String] =
@@ -130,6 +130,19 @@ object BinAggregatingScan {
       LabelOpt     -> label.map(sft.indexOf(_).toString),
       SortOpt      -> sort.toString
     )
+  }
+
+  /**
+    * Get the attributes used by a BIN query
+    *
+    * @param hints query hints
+    * @param sft simple feature type
+    * @return
+    */
+  def propertyNames(hints: Hints, sft: SimpleFeatureType): Seq[String] = {
+    val geom = hints.getBinGeomField.orElse(Option(sft.getGeomField))
+    val dtg = hints.getBinDtgField.orElse(sft.getDtgField)
+    (Seq(hints.getBinTrackIdField) ++ geom ++ dtg ++ hints.getBinLabelField).distinct.filter(_ != "id")
   }
 }
 

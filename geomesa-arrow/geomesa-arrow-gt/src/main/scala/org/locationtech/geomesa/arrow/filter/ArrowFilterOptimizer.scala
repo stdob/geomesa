@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -42,12 +42,9 @@ object ArrowFilterOptimizer extends LazyLogging {
   private val ff: FilterFactory2 = FastFilterFactory.factory
 
   def rewrite(filter: Filter, sft: SimpleFeatureType, dictionaries: Map[String, ArrowDictionary]): Filter = {
+    val bound = FastFilterFactory.optimize(sft, filter)
     FastFilterFactory.sfts.set(sft)
     try {
-      val visitors = Seq((new BindingFilterVisitor(sft), null), (new QueryPlanFilterVisitor(sft), ff))
-      val bound = visitors.foldLeft(filter) { case (f, (visitor, factory)) =>
-        f.accept(visitor, factory).asInstanceOf[Filter]
-      }
       rewriteFilter(bound, sft, dictionaries)
     } finally {
       FastFilterFactory.sfts.remove()

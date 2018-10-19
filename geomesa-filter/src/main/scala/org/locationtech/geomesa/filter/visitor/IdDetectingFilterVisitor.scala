@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -9,7 +9,7 @@
 package org.locationtech.geomesa.filter.visitor
 
 import org.geotools.filter.visitor.DefaultFilterVisitor
-import org.opengis.filter.{Id, Or}
+import org.opengis.filter.Id
 
 /**
   * Returns true if filter contains an ID filter

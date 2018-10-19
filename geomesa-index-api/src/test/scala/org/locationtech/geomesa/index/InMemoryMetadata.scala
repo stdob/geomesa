@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -33,6 +33,13 @@ class InMemoryMetadata[T] extends GeoMesaMetadata[T] {
 
   override def read(typeName: String, key: String, cache: Boolean): Option[T] = synchronized {
     schemas.get(typeName).flatMap(_.get(key))
+  }
+
+  override def scan(typeName: String, prefix: String, cache: Boolean): Seq[(String, T)] = synchronized {
+    schemas.get(typeName) match {
+      case None => Seq.empty
+      case Some(m) => m.filterKeys(_.startsWith(prefix)).toSeq
+    }
   }
 
   override def delete(typeName: String): Unit = synchronized {

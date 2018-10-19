@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -9,7 +9,7 @@
 package org.locationtech.geomesa.utils.conf
 
 import com.typesafe.scalalogging.LazyLogging
-import org.locationtech.geomesa.utils.text.Suffixes
+import org.locationtech.geomesa.utils.text.{DurationParsing, Suffixes}
 
 import scala.concurrent.duration.Duration
 import scala.util.{Failure, Success, Try}
@@ -20,6 +20,10 @@ object GeoMesaSystemProperties extends LazyLogging {
 
     val threadLocalValue = new ThreadLocal[String]()
 
+    def set(value: String): Unit = System.setProperty(property, value)
+
+    def clear(): Unit = System.clearProperty(property)
+
     def get: String = ConfigLoader.Config.get(property) match {
       case Some((value, true))  => value // final value - can't be overridden
       case Some((value, false)) => fromSysProps.getOrElse(value)
@@ -29,9 +33,9 @@ object GeoMesaSystemProperties extends LazyLogging {
     def option: Option[String] = Option(get)
 
     def toDuration: Option[Duration] = option.flatMap { value =>
-      Try(Duration.apply(value)) match {
+      Try(DurationParsing.caseInsensitive(value)) match {
         case Success(v) => Some(v)
-        case Failure(e) =>
+        case Failure(_) =>
           logger.warn(s"Invalid duration for property $property: $value")
           Option(default).map(Duration.apply)
       }
@@ -45,12 +49,21 @@ object GeoMesaSystemProperties extends LazyLogging {
       }
     }
 
-    def toBoolean: Option[java.lang.Boolean] = option.flatMap { value =>
-      Try(Boolean.box(value.toBoolean)) match {
+    def toInt: Option[Int] = option.flatMap { value =>
+      Try(value.toInt) match {
         case Success(v) => Some(v)
-        case Failure(e) =>
+        case Failure(_) =>
+          logger.warn(s"Invalid integer for property $property: $value")
+          Option(default).map(_.toInt)
+      }
+    }
+
+    def toBoolean: Option[Boolean] = option.flatMap { value =>
+      Try(value.toBoolean) match {
+        case Success(v) => Some(v)
+        case Failure(_) =>
           logger.warn(s"Invalid Boolean for property $property: $value")
-          Option(default).map(java.lang.Boolean.valueOf)
+          Option(default).map(java.lang.Boolean.parseBoolean)
       }
     }
 

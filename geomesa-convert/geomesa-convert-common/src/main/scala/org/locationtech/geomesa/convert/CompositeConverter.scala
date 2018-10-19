@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -12,6 +12,7 @@ import java.io.InputStream
 
 import com.typesafe.config.Config
 import org.locationtech.geomesa.convert.Transformers.Predicate
+import org.locationtech.geomesa.utils.io.CloseWithLogging
 import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 
 import scala.annotation.tailrec
@@ -19,6 +20,7 @@ import scala.collection.JavaConversions._
 import scala.collection.immutable.IndexedSeq
 import scala.util.Try
 
+@deprecated("Replaced with org.locationtech.geomesa.convert2.composite.CompositeConverterFactory")
 class CompositeConverterFactory[I] extends SimpleFeatureConverterFactory[I] {
 
   override def canProcess(conf: Config): Boolean =
@@ -35,9 +37,9 @@ class CompositeConverterFactory[I] extends SimpleFeatureConverterFactory[I] {
   }
 }
 
+@deprecated("Replaced with org.locationtech.geomesa.convert2.composite.CompositeConverter")
 class CompositeConverter[I](val targetSFT: SimpleFeatureType, converters: Seq[(Predicate, SimpleFeatureConverter[I])])
     extends SimpleFeatureConverter[I] {
-
 
   override val caches: Map[String, EnrichmentCache] = Map.empty
 
@@ -96,9 +98,11 @@ class CompositeConverter[I](val targetSFT: SimpleFeatureType, converters: Seq[(P
     }
   }
 
-  override def processSingleInput(i: I, ec: EvaluationContext): Seq[SimpleFeature] = ???
+  override def processSingleInput(i: I, ec: EvaluationContext): Iterator[SimpleFeature] = ???
 
   override def process(is: InputStream, ec: EvaluationContext): Iterator[SimpleFeature] = ???
+
+  override def close(): Unit = indexedConverters.foreach(CloseWithLogging.apply)
 }
 
 case class CompositeEvaluationContext(contexts: IndexedSeq[EvaluationContext]) extends EvaluationContext {

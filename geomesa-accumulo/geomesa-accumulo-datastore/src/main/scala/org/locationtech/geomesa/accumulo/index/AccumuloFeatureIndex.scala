@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,9 +8,9 @@
 
 package org.locationtech.geomesa.accumulo.index
 
+import java.util.Collections
 import java.util.Map.Entry
 
-import com.google.common.collect.{ImmutableSet, ImmutableSortedSet}
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.accumulo.core.client.mock.MockConnector
 import org.apache.accumulo.core.conf.Property
@@ -18,34 +18,30 @@ import org.apache.accumulo.core.data.{Key, Range, Value}
 import org.apache.hadoop.io.Text
 import org.geotools.filter.identity.FeatureIdImpl
 import org.locationtech.geomesa.accumulo.data._
-import org.locationtech.geomesa.accumulo.index.legacy.attribute.{AttributeIndexV2, AttributeIndexV3, AttributeIndexV4, AttributeIndexV5}
-import org.locationtech.geomesa.accumulo.index.legacy.id.RecordIndexV1
+import org.locationtech.geomesa.accumulo.index.legacy.attribute._
+import org.locationtech.geomesa.accumulo.index.legacy.id.{RecordIndexV1, RecordIndexV2}
 import org.locationtech.geomesa.accumulo.index.legacy.z2.{Z2IndexV1, Z2IndexV2, Z2IndexV3}
 import org.locationtech.geomesa.accumulo.index.legacy.z3.{Z3IndexV1, Z3IndexV2, Z3IndexV3, Z3IndexV4}
 import org.locationtech.geomesa.accumulo.util.GeoMesaBatchWriterConfig
 import org.locationtech.geomesa.accumulo.{AccumuloFeatureIndexType, AccumuloIndexManagerType, AccumuloVersion}
 import org.locationtech.geomesa.features.SerializationOption.SerializationOptions
 import org.locationtech.geomesa.features.{SerializationType, SimpleFeatureDeserializers}
+import org.locationtech.geomesa.index.conf.partition.TablePartition
 import org.locationtech.geomesa.security.SecurityUtils
 import org.locationtech.geomesa.utils.index.IndexMode.IndexMode
+import org.locationtech.geomesa.utils.index.{IndexMode, VisibilityLevel}
+import org.locationtech.geomesa.utils.io.WithClose
 import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
-
-import scala.util.Try
-import scala.util.control.NonFatal
 
 object AccumuloFeatureIndex extends AccumuloIndexManagerType with LazyLogging {
 
-  val FullColumnFamily      = new Text("F")
-  val IndexColumnFamily     = new Text("I")
-  val BinColumnFamily       = new Text("B")
-  val AttributeColumnFamily = new Text("A")
+  val SpatialIndices        = Seq(Z2Index, XZ2Index, Z2IndexV3, Z2IndexV2, Z2IndexV1)
+  val SpatioTemporalIndices = Seq(Z3Index, XZ3Index, Z3IndexV4, Z3IndexV3, Z3IndexV2, Z3IndexV1)
+  val RecordIndices         = Seq(RecordIndex, RecordIndexV2, RecordIndexV1)
+  val AttributeIndices      = Seq(AttributeIndex, AttributeIndexV6, AttributeIndexV5, AttributeIndexV4,
+                                    AttributeIndexV3, AttributeIndexV2)
 
-  val EmptyColumnQualifier  = new Text()
-
-  private val SpatialIndices        = Seq(Z2Index, XZ2Index, Z2IndexV3, Z2IndexV2, Z2IndexV1)
-  private val SpatioTemporalIndices = Seq(Z3Index, XZ3Index, Z3IndexV4, Z3IndexV3, Z3IndexV2, Z3IndexV1)
-  private val AttributeIndices      = Seq(AttributeIndex, AttributeIndexV5, AttributeIndexV4, AttributeIndexV3, AttributeIndexV2)
-  private val RecordIndices         = Seq(RecordIndex, RecordIndexV1)
+  val DeprecatedSchemaVersionKey = "geomesa.version"
 
   // note: keep in priority order for running full table scans
   // before changing the order, consider the effect of feature validation in
@@ -56,8 +52,10 @@ object AccumuloFeatureIndex extends AccumuloIndexManagerType with LazyLogging {
   override val CurrentIndices: Seq[AccumuloFeatureIndex] =
     Seq(Z3Index, XZ3Index, Z2Index, XZ2Index, RecordIndex, AttributeIndex)
 
-  override def indices(sft: SimpleFeatureType, mode: IndexMode): Seq[AccumuloFeatureIndex] =
-    super.indices(sft, mode).asInstanceOf[Seq[AccumuloFeatureIndex]]
+  override def indices(sft: SimpleFeatureType,
+                       idx: Option[String] = None,
+                       mode: IndexMode = IndexMode.Any): Seq[AccumuloFeatureIndex] =
+    super.indices(sft, idx, mode).asInstanceOf[Seq[AccumuloFeatureIndex]]
 
   override def index(identifier: String): AccumuloFeatureIndex =
     super.index(identifier).asInstanceOf[AccumuloFeatureIndex]
@@ -104,10 +102,13 @@ object AccumuloFeatureIndex extends AccumuloIndexManagerType with LazyLogging {
     import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
     lazy val docs =
       "http://www.geomesa.org/documentation/user/jobs.html#updating-existing-data-to-the-latest-index-format"
-    val version = sft.getSchemaVersion
+
+    // note: 10 was the last valid value for CURRENT_SCHEMA_VERSION, which is no longer used except
+    // to transition old schemas from the 1.2.5 era
+    val version = sft.userData[String](DeprecatedSchemaVersionKey).map(_.toInt).getOrElse(10)
     val indices = if (version > 8) {
       // note: version 9 was never in a release
-      Seq(Z3IndexV3, XZ3Index, Z2IndexV2, XZ2Index, RecordIndex, AttributeIndexV3)
+      Seq(Z3IndexV3, XZ3Index, Z2IndexV2, XZ2Index, RecordIndexV2, AttributeIndexV3)
     } else if (version == 8) {
       Seq(Z3IndexV2, Z2IndexV1, RecordIndexV1, AttributeIndexV2)
     } else if (version > 5) {
@@ -134,78 +135,121 @@ object AccumuloFeatureIndex extends AccumuloIndexManagerType with LazyLogging {
 
 trait AccumuloFeatureIndex extends AccumuloFeatureIndexType {
 
-  import AccumuloFeatureIndex.{AttributeColumnFamily, BinColumnFamily, FullColumnFamily}
   import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 
   protected def hasPrecomputedBins: Boolean
 
-  override def configure(sft: SimpleFeatureType, ds: AccumuloDataStore): Unit = {
-    import scala.collection.JavaConversions._
+  override def configure(sft: SimpleFeatureType, ds: AccumuloDataStore, partition: Option[String]): String = {
+    import scala.collection.JavaConverters._
 
-    super.configure(sft, ds)
-
-    val table = getTableName(sft.getTypeName, ds)
+    val table = super.configure(sft, ds, partition)
 
     // create table if needed
     AccumuloVersion.ensureTableExists(ds.connector, table, sft.isLogicalTime)
 
     // create splits
-    val splitsToAdd = getSplits(sft).map(new Text(_)).toSet -- ds.tableOps.listSplits(table).toSet
+    val splitsToAdd = getSplits(sft, partition).map(new Text(_)).toSet -- ds.tableOps.listSplits(table).asScala.toSet
     if (splitsToAdd.nonEmpty) {
-      // noinspection RedundantCollectionConversion
-      ds.tableOps.addSplits(table, ImmutableSortedSet.copyOf(splitsToAdd.toIterable))
+      ds.tableOps.addSplits(table, new java.util.TreeSet(splitsToAdd.asJava))
     }
 
     // create locality groups
-    val cfs = if (hasPrecomputedBins) {
-      Seq(FullColumnFamily, BinColumnFamily, AttributeColumnFamily)
-    } else {
-      Seq(FullColumnFamily, AttributeColumnFamily)
+    val existingGroups = ds.tableOps.getLocalityGroups(table)
+    val localityGroups = new java.util.HashMap[String, java.util.Set[Text]](existingGroups)
+
+    def addGroup(cf: Text): Unit = {
+      val key = cf.toString
+      if (localityGroups.containsKey(key)) {
+        val update = new java.util.HashSet(localityGroups.get(key))
+        update.add(cf)
+        localityGroups.put(key, update)
+      } else {
+        localityGroups.put(key, Collections.singleton(cf))
+      }
     }
-    val localityGroups = cfs.map(cf => (cf.toString, ImmutableSet.of(cf))).toMap
-    ds.tableOps.setLocalityGroups(table, localityGroups)
+
+    AccumuloColumnGroups(sft).foreach { case (k, _) => addGroup(k) }
+    if (sft.getVisibilityLevel == VisibilityLevel.Attribute) {
+      addGroup(AccumuloColumnGroups.AttributeColumnFamily)
+    }
+    if (hasPrecomputedBins) {
+      addGroup(AccumuloColumnGroups.BinColumnFamily)
+    }
+
+    if (localityGroups != existingGroups) {
+      ds.tableOps.setLocalityGroups(table, localityGroups)
+    }
 
     // enable block cache
     ds.tableOps.setProperty(table, Property.TABLE_BLOCKCACHE_ENABLED.getKey, "true")
+
+    table
   }
 
-  override def delete(sft: SimpleFeatureType, ds: AccumuloDataStore, shared: Boolean): Unit = {
-    import scala.collection.JavaConversions._
-
-    val table = getTableName(sft.getTypeName, ds)
-    if (ds.tableOps.exists(table)) {
-      if (shared) {
-        val auths = ds.config.authProvider.getAuthorizations
-        val config = GeoMesaBatchWriterConfig().setMaxWriteThreads(ds.config.writeThreads)
-        val prefix = new Text(sft.getTableSharingPrefix)
-        val deleter = ds.connector.createBatchDeleter(table, auths, ds.config.queryThreads, config)
-        try {
-          deleter.setRanges(Seq(new Range(prefix, true, Range.followingPrefix(prefix), false)))
-          deleter.delete()
-        } finally {
-          deleter.close()
-        }
-      } else {
-        // we need to synchronize deleting of tables in mock accumulo as it's not thread safe
-        if (ds.connector.isInstanceOf[MockConnector]) {
-          ds.connector.synchronized(ds.tableOps.delete(table))
-        } else {
-          ds.tableOps.delete(table)
+  override def removeAll(sft: SimpleFeatureType, ds: AccumuloDataStore): Unit = {
+    if (TablePartition.partitioned(sft)) {
+      // partitioned indices can just drop the partitions
+      delete(sft, ds, None)
+    } else {
+      getTableNames(sft, ds, None).par.foreach { table =>
+        if (ds.tableOps.exists(table)) {
+          val auths = ds.config.authProvider.getAuthorizations
+          val config = GeoMesaBatchWriterConfig().setMaxWriteThreads(ds.config.writeThreads)
+          WithClose(ds.connector.createBatchDeleter(table, auths, ds.config.queryThreads, config)) { deleter =>
+            val range = if (sft.isTableSharing) {
+              val prefix = new Text(sft.getTableSharingBytes)
+              new Range(prefix, true, Range.followingPrefix(prefix), false)
+            } else {
+              new Range()
+            }
+            deleter.setRanges(Collections.singletonList(range))
+            deleter.delete()
+          }
         }
       }
     }
   }
 
+  override def delete(sft: SimpleFeatureType, ds: AccumuloDataStore, partition: Option[String]): Unit = {
+    val shared = sft.isTableSharing &&
+        ds.getTypeNames.filter(_ != sft.getTypeName).map(ds.getSchema).exists(_.isTableSharing)
+    if (shared) {
+      if (partition.isDefined) {
+        throw new IllegalStateException("Found a shared schema with partitioning, which should not be possible")
+      }
+      removeAll(sft, ds)
+    } else {
+      getTableNames(sft, ds, partition).par.foreach { table =>
+        if (ds.tableOps.exists(table)) {
+          // we need to synchronize deleting of tables in mock accumulo as it's not thread safe
+          if (ds.connector.isInstanceOf[MockConnector]) {
+            ds.connector.synchronized(ds.tableOps.delete(table))
+          } else {
+            ds.tableOps.delete(table)
+          }
+        }
+      }
+    }
+
+    // deletes the metadata
+    super.delete(sft, ds, partition)
+  }
+
   // back compatibility check for old metadata keys
-  abstract override def getTableName(typeName: String, ds: AccumuloDataStore): String = {
+  abstract override def getTableNames(sft: SimpleFeatureType,
+                                      ds: AccumuloDataStore,
+                                      partition: Option[String]): Seq[String] = {
     lazy val oldKey = this match {
-      case i if i.name == RecordIndex.name    => "tables.record.name"
+      case i if i.name == RecordIndexV1.name  => "tables.record.name"
       case i if i.name == AttributeIndex.name => "tables.idx.attr.name"
       case i => s"tables.${i.name}.name"
     }
-    Try(super.getTableName(typeName, ds)).recoverWith {
-      case NonFatal(e) => Try(ds.metadata.read(typeName, oldKey).getOrElse(throw e))
-    }.get
+    val names = super.getTableNames(sft, ds, partition)
+    if (names.isEmpty) {
+      ds.metadata.read(sft.getTypeName, oldKey).toSeq
+    } else {
+      names
+    }
   }
 
   /**
@@ -216,11 +260,11 @@ trait AccumuloFeatureIndex extends AccumuloFeatureIndexType {
     * @return
     */
   private [index] def entriesToFeatures(sft: SimpleFeatureType,
-                                        returnSft: SimpleFeatureType): (Entry[Key, Value]) => SimpleFeature = {
+                                        returnSft: SimpleFeatureType): Entry[Key, Value] => SimpleFeature = {
     // Perform a projecting decode of the simple feature
     if (serializedWithId) {
       val deserializer = SimpleFeatureDeserializers(returnSft, SerializationType.KRYO)
-      (kv: Entry[Key, Value]) => {
+      kv: Entry[Key, Value] => {
         val sf = deserializer.deserialize(kv.getValue.get)
         AccumuloFeatureIndex.applyVisibility(sf, kv.getKey)
         sf
@@ -228,10 +272,10 @@ trait AccumuloFeatureIndex extends AccumuloFeatureIndexType {
     } else {
       val getId = getIdFromRow(sft)
       val deserializer = SimpleFeatureDeserializers(returnSft, SerializationType.KRYO, SerializationOptions.withoutId)
-      (kv: Entry[Key, Value]) => {
+      kv: Entry[Key, Value] => {
         val sf = deserializer.deserialize(kv.getValue.get)
         val row = kv.getKey.getRow
-        sf.getIdentifier.asInstanceOf[FeatureIdImpl].setID(getId(row.getBytes, 0, row.getLength))
+        sf.getIdentifier.asInstanceOf[FeatureIdImpl].setID(getId(row.getBytes, 0, row.getLength, sf))
         AccumuloFeatureIndex.applyVisibility(sf, kv.getKey)
         sf
       }

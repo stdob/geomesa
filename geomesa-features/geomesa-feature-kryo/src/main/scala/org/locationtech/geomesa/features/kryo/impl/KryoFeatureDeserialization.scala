@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -30,10 +30,10 @@ trait KryoFeatureDeserialization extends SimpleFeatureSerializer {
 
   private [kryo] def deserializeSft: SimpleFeatureType
 
-  private val withoutId = options.withoutId
   private val withoutUserData = !options.withUserData
+  protected val withoutId: Boolean = options.withoutId
 
-  protected val readers = getReaders(CacheKeyGenerator.cacheKey(deserializeSft), deserializeSft)
+  protected val readers: Array[Input => AnyRef] = getReaders(CacheKeyGenerator.cacheKey(deserializeSft), deserializeSft)
 
   protected def readUserData(input: Input, skipOffsets: Boolean): java.util.Map[AnyRef, AnyRef] = {
     if (withoutUserData) {
@@ -51,12 +51,6 @@ trait KryoFeatureDeserialization extends SimpleFeatureSerializer {
     }
   }
 
-  protected def readId(input: Input): String = {
-    if (withoutId) { "" } else {
-      input.readString()
-    }
-  }
-
   def getReusableFeature: KryoBufferSimpleFeature =
     new KryoBufferSimpleFeature(deserializeSft, readers, readUserData(_, skipOffsets = false), options)
 }
@@ -68,7 +62,7 @@ object KryoFeatureDeserialization {
 
   def getInput(bytes: Array[Byte], offset: Int, count: Int): Input = {
     val in = inputs.getOrElseUpdate(new Input)
-    in.setBuffer(bytes, offset, offset + count)
+    in.setBuffer(bytes, offset, count)
     in
   }
 
@@ -79,16 +73,16 @@ object KryoFeatureDeserialization {
     in
   }
 
-  private [kryo] def getReaders(key: String, sft: SimpleFeatureType): Array[(Input) => AnyRef] = {
+  private [geomesa] def getReaders(key: String, sft: SimpleFeatureType): Array[(Input) => AnyRef] = {
     import scala.collection.JavaConversions._
     readers.getOrElseUpdate(key, sft.getAttributeDescriptors.map { ad =>
-      val (otype, bindings)  = ObjectType.selectType(ad.getType.getBinding, ad.getUserData)
-      matchReader(otype, bindings)
+      val bindings = ObjectType.selectType(ad.getType.getBinding, ad.getUserData)
+      matchReader(bindings)
     }.toArray)
   }
 
-  private [kryo] def matchReader(otype: ObjectType, bindings: Seq[ObjectType] = Seq.empty): (Input) => AnyRef = {
-    otype match {
+  private [geomesa] def matchReader(bindings: Seq[ObjectType]): (Input) => AnyRef = {
+    bindings.head match {
       case ObjectType.STRING => (i: Input) => i.readString()
       case ObjectType.INT => readNullable((i: Input) => i.readInt().asInstanceOf[AnyRef])
       case ObjectType.LONG => readNullable((i: Input) => i.readLong().asInstanceOf[AnyRef])
@@ -106,7 +100,7 @@ object KryoFeatureDeserialization {
       case ObjectType.GEOMETRY => KryoGeometrySerialization.deserialize // null checks are handled by geometry serializer
       case ObjectType.JSON => (i: Input) => KryoJsonSerialization.deserializeAndRender(i)
       case ObjectType.LIST =>
-        val valueReader = matchReader(bindings.head)
+        val valueReader = matchReader(bindings.drop(1))
         (i: Input) => {
           val size = i.readInt(true)
           if (size == -1) {
@@ -122,8 +116,8 @@ object KryoFeatureDeserialization {
           }
         }
       case ObjectType.MAP =>
-        val keyReader = matchReader(bindings.head)
-        val valueReader = matchReader(bindings(1))
+        val keyReader = matchReader(bindings.slice(1, 2))
+        val valueReader = matchReader(bindings.drop(2))
         (i: Input) => {
           val size = i.readInt(true)
           if (size == -1) {

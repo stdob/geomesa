@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -13,6 +13,7 @@ import java.util.regex.Pattern
 
 import com.googlecode.cqengine.attribute.Attribute
 import com.googlecode.cqengine.query.Query
+import com.googlecode.cqengine.query.simple.All
 import com.googlecode.cqengine.{query => cqquery}
 import com.vividsolutions.jts.geom.Geometry
 import org.geotools.filter.LikeToRegexConverter
@@ -46,7 +47,11 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
         case _ => throw new RuntimeException(s"Can't parse filter: $f.")
       }
     }.toList
-    new cqquery.logical.And[SimpleFeature](query)
+    if (query.exists(_.isInstanceOf[All[_]])) {
+      new cqquery.simple.All(classOf[SimpleFeature])
+    } else {
+      new cqquery.logical.And[SimpleFeature](query)
+    }
   }
 
   /**
@@ -61,7 +66,11 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
         case _ => throw new RuntimeException(s"Can't parse filter: $f.")
       }
     }.toList
-    new cqquery.logical.Or[SimpleFeature](query)
+    if (query.exists(_.isInstanceOf[All[_]])) {
+      new cqquery.simple.All(classOf[SimpleFeature])
+    } else {
+      new cqquery.logical.Or[SimpleFeature](query)
+    }
   }
 
   /**
@@ -74,7 +83,14 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
       case q: Query[SimpleFeature] => q
       case _ => throw new RuntimeException(s"Can't parse filter: $subfilter.")
     }
-    new cqquery.logical.Not[SimpleFeature](subquery)
+    // In the event that the visitor cannot 'plan' a query, it returns an 'All' Query to indicate
+    //  that all the Simple Features should be considered.
+    // As such, we do not negate the query going back.
+    if (subquery.isInstanceOf[All[_]]) {
+      subquery
+    } else {
+      new cqquery.logical.Not[SimpleFeature](subquery)
+    }
   }
 
   /* Id, null, nil, exclude, include */
@@ -127,10 +143,11 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
   override def visit(filter: PropertyIsEqualTo, data: scala.Any): AnyRef = {
     val name = getAttribute(filter)
     val attribute: Attribute[SimpleFeature, Any] = lookup.lookup[Any](name)
-    val value = FilterHelper.extractAttributeBounds(filter, name, attribute.getAttributeType).values.headOption.getOrElse {
-      throw new RuntimeException(s"Can't parse equals values ${filterToString(filter)}")
-    }.lower.value.get
-    new cqquery.simple.Equal(attribute, value)
+    val bounds = FilterHelper.extractAttributeBounds(filter, name, attribute.getAttributeType).values.headOption.getOrElse {
+      Bounds.everything[Any]
+    }
+    if(!bounds.isBounded) new cqquery.simple.All(classOf[SimpleFeature])
+    else new cqquery.simple.Equal(attribute, bounds.lower.value.get)
   }
 
   /**
@@ -140,7 +157,7 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
     val name = getAttribute(filter)
     val binding = sft.getDescriptor(name).getType.getBinding
     FilterHelper.extractAttributeBounds(filter, name, binding).values.headOption.getOrElse {
-      throw new RuntimeException(s"Can't parse greater than values ${filterToString(filter)}")
+      Bounds.everything[Any]
     }.bounds match {
       case (Some(lo), None) =>
         binding match {
@@ -149,6 +166,7 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
           case c if classOf[java.lang.Float  ].isAssignableFrom(c) => BuildFloatGTQuery(name, lo.asInstanceOf[java.lang.Float])
           case c if classOf[java.lang.Double ].isAssignableFrom(c) => BuildDoubleGTQuery(name, lo.asInstanceOf[java.lang.Double])
           case c if classOf[java.util.Date   ].isAssignableFrom(c) => BuildDateGTQuery(name, lo.asInstanceOf[java.util.Date])
+          case c if classOf[java.lang.String ].isAssignableFrom(c) => BuildStringGTQuery(name, lo.asInstanceOf[java.lang.String])
           case c => throw new RuntimeException(s"PropertyIsGreaterThan: $c not supported")
         }
       case (None, Some(hi)) =>
@@ -158,9 +176,10 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
           case c if classOf[java.lang.Float  ].isAssignableFrom(c) => BuildFloatLTQuery(name, hi.asInstanceOf[java.lang.Float])
           case c if classOf[java.lang.Double ].isAssignableFrom(c) => BuildDoubleLTQuery(name, hi.asInstanceOf[java.lang.Double])
           case c if classOf[java.util.Date   ].isAssignableFrom(c) => BuildDateLTQuery(name, hi.asInstanceOf[java.util.Date])
+          case c if classOf[java.lang.String   ].isAssignableFrom(c) => BuildStringLTQuery(name, hi.asInstanceOf[java.lang.String])
           case c => throw new RuntimeException(s"PropertyIsGreaterThan: $c not supported")
         }
-      case _ => throw new RuntimeException(s"Can't parse greater than values ${filterToString(filter)}")
+      case _ => new cqquery.simple.All(classOf[SimpleFeature])
     }
   }
 
@@ -171,7 +190,7 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
     val name = getAttribute(filter)
     val binding = sft.getDescriptor(name).getType.getBinding
     FilterHelper.extractAttributeBounds(filter, name, binding).values.headOption.getOrElse {
-      throw new RuntimeException(s"Can't parse greater than or equal to values ${filterToString(filter)}")
+      Bounds.everything[Any]
     }.bounds match {
       case (Some(lo), None) =>
         binding match {
@@ -180,6 +199,7 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
           case c if classOf[java.lang.Float  ].isAssignableFrom(c) => BuildFloatGTEQuery(name, lo.asInstanceOf[java.lang.Float])
           case c if classOf[java.lang.Double ].isAssignableFrom(c) => BuildDoubleGTEQuery(name, lo.asInstanceOf[java.lang.Double])
           case c if classOf[java.util.Date   ].isAssignableFrom(c) => BuildDateGTEQuery(name, lo.asInstanceOf[java.util.Date])
+          case c if classOf[java.lang.String   ].isAssignableFrom(c) => BuildStringGTEQuery(name, lo.asInstanceOf[java.lang.String])
           case c => throw new RuntimeException(s"PropertyIsGreaterThanOrEqualTo: $c not supported")
         }
       case (None, Some(hi)) =>
@@ -189,9 +209,10 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
           case c if classOf[java.lang.Float  ].isAssignableFrom(c) => BuildFloatLTEQuery(name, hi.asInstanceOf[java.lang.Float])
           case c if classOf[java.lang.Double ].isAssignableFrom(c) => BuildDoubleLTEQuery(name, hi.asInstanceOf[java.lang.Double])
           case c if classOf[java.util.Date   ].isAssignableFrom(c) => BuildDateLTEQuery(name, hi.asInstanceOf[java.util.Date])
+          case c if classOf[java.lang.String   ].isAssignableFrom(c) => BuildStringLTEQuery(name, hi.asInstanceOf[java.lang.String])
           case c => throw new RuntimeException(s"PropertyIsGreaterThanOrEqualTo: $c not supported")
         }
-      case _ => throw new RuntimeException(s"Can't parse greater than or equal to values ${filterToString(filter)}")
+      case _ => new cqquery.simple.All(classOf[SimpleFeature])
     }
   }
 
@@ -202,7 +223,7 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
     val name = getAttribute(filter)
     val binding = sft.getDescriptor(name).getType.getBinding
     FilterHelper.extractAttributeBounds(filter, name, binding).values.headOption.getOrElse {
-      throw new RuntimeException(s"Can't parse less than values ${filterToString(filter)}")
+      Bounds.everything[Any]
     }.bounds match {
       case (Some(lo), None) =>
         binding match {
@@ -211,6 +232,7 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
           case c if classOf[java.lang.Float  ].isAssignableFrom(c) => BuildFloatGTQuery(name, lo.asInstanceOf[java.lang.Float])
           case c if classOf[java.lang.Double ].isAssignableFrom(c) => BuildDoubleGTQuery(name, lo.asInstanceOf[java.lang.Double])
           case c if classOf[java.util.Date   ].isAssignableFrom(c) => BuildDateGTQuery(name, lo.asInstanceOf[java.util.Date])
+          case c if classOf[java.lang.String   ].isAssignableFrom(c) => BuildStringGTQuery(name, lo.asInstanceOf[java.lang.String])
           case c => throw new RuntimeException(s"PropertyIsLessThan: $c not supported")
         }
       case (None, Some(hi)) =>
@@ -220,9 +242,10 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
           case c if classOf[java.lang.Float  ].isAssignableFrom(c) => BuildFloatLTQuery(name, hi.asInstanceOf[java.lang.Float])
           case c if classOf[java.lang.Double ].isAssignableFrom(c) => BuildDoubleLTQuery(name, hi.asInstanceOf[java.lang.Double])
           case c if classOf[java.util.Date   ].isAssignableFrom(c) => BuildDateLTQuery(name, hi.asInstanceOf[java.util.Date])
+          case c if classOf[java.lang.String   ].isAssignableFrom(c) => BuildStringLTQuery(name, hi.asInstanceOf[java.lang.String])
           case c => throw new RuntimeException(s"PropertyIsLessThan: $c not supported")
         }
-      case _ => throw new RuntimeException(s"Can't parse less than values ${filterToString(filter)}")
+      case _ => new cqquery.simple.All(classOf[SimpleFeature])
     }
   }
 
@@ -233,7 +256,7 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
     val name = getAttribute(filter)
     val binding = sft.getDescriptor(name).getType.getBinding
     FilterHelper.extractAttributeBounds(filter, name, binding).values.headOption.getOrElse {
-      throw new RuntimeException(s"Can't parse less than or equal to values ${filterToString(filter)}")
+      Bounds.everything[Any]
     }.bounds match {
       case (Some(lo), None) =>
         binding match {
@@ -242,6 +265,7 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
           case c if classOf[java.lang.Float  ].isAssignableFrom(c) => BuildFloatGTEQuery(name, lo.asInstanceOf[java.lang.Float])
           case c if classOf[java.lang.Double ].isAssignableFrom(c) => BuildDoubleGTEQuery(name, lo.asInstanceOf[java.lang.Double])
           case c if classOf[java.util.Date   ].isAssignableFrom(c) => BuildDateGTEQuery(name, lo.asInstanceOf[java.util.Date])
+          case c if classOf[java.lang.String   ].isAssignableFrom(c) => BuildStringGTEQuery(name, lo.asInstanceOf[java.lang.String])
           case c => throw new RuntimeException(s"PropertyIsLessThanOrEqualTo: $c not supported")
         }
       case (None, Some(hi)) =>
@@ -251,9 +275,10 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
           case c if classOf[java.lang.Float  ].isAssignableFrom(c) => BuildFloatLTEQuery(name, hi.asInstanceOf[java.lang.Float])
           case c if classOf[java.lang.Double ].isAssignableFrom(c) => BuildDoubleLTEQuery(name, hi.asInstanceOf[java.lang.Double])
           case c if classOf[java.util.Date   ].isAssignableFrom(c) => BuildDateLTEQuery(name, hi.asInstanceOf[java.util.Date])
+          case c if classOf[java.lang.String   ].isAssignableFrom(c) => BuildStringLTEQuery(name, hi.asInstanceOf[java.lang.String])
           case c => throw new RuntimeException(s"PropertyIsLessThanOrEqualTo: $c not supported")
         }
-      case _ => throw new RuntimeException(s"Can't parse less than or equal to values ${filterToString(filter)}")
+      case _ => new cqquery.simple.All(classOf[SimpleFeature])
     }
   }
 
@@ -294,6 +319,7 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
       case c if classOf[java.lang.Float  ].isAssignableFrom(c) => BuildFloatBetweenQuery(name, between.asInstanceOf[(java.lang.Float, java.lang.Float)])
       case c if classOf[java.lang.Double ].isAssignableFrom(c) => BuildDoubleBetweenQuery(name, between.asInstanceOf[(java.lang.Double, java.lang.Double)])
       case c if classOf[java.util.Date   ].isAssignableFrom(c) => BuildDateBetweenQuery(name, between.asInstanceOf[(java.util.Date, java.util.Date)])
+      case c if classOf[java.lang.String   ].isAssignableFrom(c) => BuildStringBetweenQuery(name, between.asInstanceOf[(java.lang.String, java.lang.String)])
       case c => throw new RuntimeException(s"PropertyIsBetween: $c not supported")
     }
   }
@@ -362,8 +388,8 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
         FilterHelper.extractIntervals(after, name).values.headOption.getOrElse {
           throw new RuntimeException(s"Can't parse after values ${filterToString(after)}")
         }.bounds match {
-          case (Some(lo), None) => new cqquery.simple.GreaterThan[SimpleFeature, Date](attr, lo.toDate, false)
-          case (None, Some(hi)) => new cqquery.simple.LessThan[SimpleFeature, Date](attr, hi.toDate, false)
+          case (Some(lo), None) => new cqquery.simple.GreaterThan[SimpleFeature, Date](attr, Date.from(lo.toInstant), false)
+          case (None, Some(hi)) => new cqquery.simple.LessThan[SimpleFeature, Date](attr, Date.from(hi.toInstant), false)
         }
 
       case c => throw new RuntimeException(s"After: $c not supported")
@@ -381,8 +407,8 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
         FilterHelper.extractIntervals(before, name).values.headOption.getOrElse {
           throw new RuntimeException(s"Can't parse before values ${filterToString(before)}")
         }.bounds match {
-          case (Some(lo), None) => new cqquery.simple.GreaterThan[SimpleFeature, Date](attr, lo.toDate, false)
-          case (None, Some(hi)) => new cqquery.simple.LessThan[SimpleFeature, Date](attr, hi.toDate, false)
+          case (Some(lo), None) => new cqquery.simple.GreaterThan[SimpleFeature, Date](attr, Date.from(lo.toInstant), false)
+          case (None, Some(hi)) => new cqquery.simple.LessThan[SimpleFeature, Date](attr, Date.from(hi.toInstant), false)
         }
 
       case c => throw new RuntimeException(s"Before: $c not supported")
@@ -400,8 +426,8 @@ class CQEngineQueryVisitor(sft: SimpleFeatureType) extends AbstractFilterVisitor
         val bounds = FilterHelper.extractIntervals(during, name).values.headOption.getOrElse {
           throw new RuntimeException(s"Can't parse during values ${filterToString(during)}")
         }
-        new cqquery.simple.Between[SimpleFeature, java.util.Date](attr, bounds.lower.value.get.toDate,
-          bounds.lower.inclusive, bounds.upper.value.get.toDate, bounds.upper.inclusive)
+        new cqquery.simple.Between[SimpleFeature, java.util.Date](attr, Date.from(bounds.lower.value.get.toInstant),
+          bounds.lower.inclusive, Date.from(bounds.upper.value.get.toInstant), bounds.upper.inclusive)
 
       case c => throw new RuntimeException(s"During: $c not supported")
     }

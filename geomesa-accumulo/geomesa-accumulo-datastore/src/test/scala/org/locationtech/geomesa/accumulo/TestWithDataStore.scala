@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,7 +8,7 @@
 
 package org.locationtech.geomesa.accumulo
 
-import org.apache.accumulo.core.client.{Connector, Scanner}
+import org.apache.accumulo.core.client.Connector
 import org.apache.accumulo.core.client.mock.MockInstance
 import org.apache.accumulo.core.client.security.tokens.PasswordToken
 import org.apache.accumulo.core.data.Key
@@ -18,14 +18,13 @@ import org.geotools.factory.Hints
 import org.geotools.feature.DefaultFeatureCollection
 import org.geotools.filter.text.ecql.ECQL
 import org.locationtech.geomesa.accumulo.data.{AccumuloDataStore, AccumuloDataStoreParams}
-import org.locationtech.geomesa.accumulo.index.AccumuloFeatureIndex
 import org.locationtech.geomesa.index.utils.ExplainString
 import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes
 import org.opengis.feature.simple.SimpleFeature
 import org.opengis.filter.Filter
 import org.specs2.mutable.Specification
-import org.specs2.specification.{Fragments, Step}
+import org.specs2.specification.core.Fragments
 
 import scala.collection.JavaConverters._
 
@@ -40,6 +39,8 @@ trait TestWithDataStore extends Specification {
   // TODO GEOMESA-1146 refactor to allow running of tests with table sharing on and off...
   def tableSharing: Boolean = true
 
+  def additionalDsParams(): Map[String, Any] = Map.empty
+
   // we use class name to prevent spillage between unit tests in the mock connector
   lazy val sftName: String = getClass.getSimpleName
 
@@ -52,11 +53,11 @@ trait TestWithDataStore extends Specification {
   )
   val MockUserAuthSeq = Seq("A", "B", "C")
 
-
   lazy val mockInstanceId = "mycloud"
   lazy val mockZookeepers = "myzoo"
   lazy val mockUser = "user"
   lazy val mockPassword = "password"
+  lazy val catalog = sftName
 
   lazy val mockInstance = new MockInstance(mockInstanceId)
 
@@ -71,8 +72,8 @@ trait TestWithDataStore extends Specification {
     AccumuloDataStoreParams.ConnectorParam.key -> connector,
     AccumuloDataStoreParams.CachingParam.key   -> false,
     // note the table needs to be different to prevent testing errors
-    AccumuloDataStoreParams.CatalogParam.key   -> sftName
-  )
+    AccumuloDataStoreParams.CatalogParam.key   -> catalog
+  ) ++ additionalDsParams()
 
   lazy val (ds, sft) = {
     val sft = SimpleFeatureTypes.createType(sftName, spec)
@@ -86,7 +87,7 @@ trait TestWithDataStore extends Specification {
   lazy val fs = ds.getFeatureSource(sftName)
 
   // after all tests, drop the tables we created to free up memory
-  override def map(fragments: => Fragments) = fragments ^ Step {
+  override def map(fragments: => Fragments): Fragments = fragments ^ fragmentFactory.step {
     ds.removeSchema(sftName)
     ds.dispose()
   }
@@ -120,9 +121,6 @@ trait TestWithDataStore extends Specification {
   }
 
   def explain(filter: String): String = explain(new Query(sftName, ECQL.toFilter(filter)))
-
-  def scanner(table: AccumuloFeatureIndex): Scanner =
-    connector.createScanner(table.getTableName(sftName, ds), new Authorizations())
 
   def rowToString(key: Key) = bytesToString(key.getRow.copyBytes())
 

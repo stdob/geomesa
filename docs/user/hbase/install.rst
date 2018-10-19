@@ -2,28 +2,78 @@ Installing GeoMesa HBase
 ========================
 
 GeoMesa supports traditional HBase installations as well as HBase running on `Amazon's EMR <https://aws.amazon.com/emr/>`_
-and `Hortonworks' Data Platform (HDP) <https://hortonworks.com/products/data-center/hdp/>`_. For instructions on
-bootstrapping an EMR cluster, please read this tutorial: :doc:`/tutorials/geomesa-hbase-s3-on-aws`.
-
-.. _setting_up_hbase_commandline:
+, `Hortonworks' Data Platform (HDP) <https://hortonworks.com/products/data-center/hdp/>`_, and the
+`Cloudera Distribution of Hadoop (CDH) <https://www.cloudera.com/products/enterprise-data-hub.html>`_. For details
+on bootstrapping an EMR cluster, see :doc:`/tutorials/geomesa-hbase-s3-on-aws`. For details on deploying to
+Cloudera CDH, see :doc:`/tutorials/geomesa-hbase-on-cdh`.
 
 Installing the Binary Distribution
 ----------------------------------
 
 GeoMesa HBase artifacts are available for download or can be built from source.
-The easiest way to get started is to download the most recent binary version (``$VERSION`` = |release|)
-and untar it somewhere convenient:
+The easiest way to get started is to download the most recent binary version
+(|release|) from `GitHub`__.
+
+__ https://github.com/locationtech/geomesa/releases
+
+Extract it somewhere convenient:
 
 .. code-block:: bash
 
-    # Install to /opt/ adapt as needed for your environment
-    $ wget http://repo.locationtech.org/content/repositories/geomesa-releases/org/locationtech/geomesa/geomesa-hbase-dist_2.11/$VERSION/geomesa-hbase-dist_2.11-$VERSION-bin.tar.gz
-    $ tar xvf geomesa-hbase-dist_2.11-$VERSION-bin.tar.gz -C /opt/
-
-    # Add symbolic links
-    $ ln -s /opt/geomesa-hbase-dist_2.11-$VERSION /opt/geomesa
-    $ ls /opt/geomesa
+    # download and unpackage the most recent distribution:
+    $ wget "https://github.com/locationtech/geomesa/releases/download/geomesa_2.11-$VERSION/geomesa-hbase_2.11-$VERSION-bin.tar.gz"
+    $ tar xvf geomesa-hbase_2.11-$VERSION-bin.tar.gz
+    $ cd geomesa-hbase_2.11-$VERSION
+    $ ls
     bin/  conf/  dist/  docs/  examples/  lib/  LICENSE.txt  logs/
+
+.. _hbase_install_source:
+
+Building from Source
+--------------------
+
+GeoMesa HBase may also be built from source. For more information refer to :ref:`building_from_source`
+in the developer manual, or to the ``README.md`` file in the the source distribution.
+The remainder of the instructions in this chapter assume the use of the binary GeoMesa HBase
+distribution. If you have built from source, the distribution is created in the ``target`` directory of
+``geomesa-hbase/geomesa-hbase-dist``.
+
+More information about developing with GeoMesa may be found in the :doc:`/developer/index`.
+
+.. _hbase_deploy_distributed_runtime:
+
+Installing the GeoMesa Distributed Runtime JAR
+----------------------------------------------
+
+GeoMesa uses custom HBase filters and coprocessors to speed up queries. In order to use them, you must deploy the
+distributed runtime jar to the HBase to the directory specified by the HBase configuration variable called
+``hbase.dynamic.jars.dir``.  This is set to ``${hbase.rootdir}/lib`` by default.  Copy the distribute runtime jar to
+this directory as follows:
+
+.. code-block:: bash
+
+    hadoop fs -put ${GEOMESA_HBASE_HOME}/dist/hbase/geomesa-hbase-distributed-runtime-$VERSION.jar ${hbase.dynamic.jars.dir}/
+
+If running on top of Amazon S3, you will need to use the ``aws s3`` command line tool.
+
+.. code-block:: bash
+
+    aws s3 cp ${GEOMESA_HBASE_HOME}/dist/hbase/geomesa-hbase-distributed-runtime-$VERSION.jar s3://${hbase.dynamic.jars.dir}/
+
+If required, you may disable distributed processing by setting the system property ``geomesa.hbase.remote.filtering``
+to ``false``. Note that this may have an adverse effect on performance.
+
+.. _registering_coprocessors:
+
+Register the Coprocessors
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Assuming that you have installed the distributed runtime JAR under ``hbase.dynamic.jars.dir``, coprocessors will be
+registered automatically when you call ``createSchema`` on a data store. Alternatively, the coprocessors may be
+registered manually. See :ref:`coprocessor_alternate` for details.
+
+For more information on managing coprocessors see
+`Coprocessor Introduction <https://blogs.apache.org/hbase/entry/coprocessor_introduction>`_ on Apache's Blog.
 
 Configuration and Classpaths
 ----------------------------
@@ -119,7 +169,17 @@ A few suggested configurations are below:
 
         You will also need to provide the hbase-site.xml file within a the GeoMesa ``conf`` directory, an external
         directory, zip, or JAR archive (an entry referencing the XML file directly will not work with the Java
-        classpath)
+        classpath). 
+
+        When creating a zip or jar file, the hbase-site.xml should be at the root level of the archive
+        and not nested within any packages or subfolders. For example:
+
+        .. code-block:: bash
+
+            $ jar tf my.jar
+            META-INF/
+            META-INF/MANIFEST.MF
+            hbase-site.xml 
 
         .. code-block:: bash
 
@@ -127,6 +187,8 @@ A few suggested configurations are below:
             cp /path/to/hbase-site.xml ${GEOMESA_HBASE_HOME}/conf/
 
             # or this
+            cd /path/to/hbase-conf-dir
+            jar cvf conf.jar hbase-site.xml
             export GEOMESA_EXTRA_CLASSPATHS=/path/to/confdir:/path/to/conf.zip:/path/to/conf.jar
 
 
@@ -138,228 +200,91 @@ Do this with the following commands:
     $ bin/install-jai.sh
     $ bin/install-jline.sh
 
-.. _hbase_deploy_distributed_runtime:
+.. _setting_up_hbase_commandline:
 
-Deploying the GeoMesa HBase distributed runtime jar
----------------------------------------------------
+Setting up the HBase Command Line Tools
+---------------------------------------
 
-GeoMesa uses an HBase custom filter to improve processing of CQL queries.  In order to use the custom filter, you must
-deploy the distributed runtime jar to the HBase to the directory specified by the HBase configuration variable called
-``hbase.dynamic.jars.dir``.  This is set to ``${hbase.rootdir}/lib`` by default.  Copy the distribute runtime jar to
-this directory as follows:
+.. warning::
+
+    To use HBase with the command line tools, you need to install the coprocessors first, as described above.
+
+GeoMesa comes with a set of command line tools for managing HBase features located in
+``geomesa-hbase_2.11-$VERSION/bin/`` of the binary distribution.
+
+.. note::
+
+    You can configure environment variables and classpath settings in geomesa-hbase_2.11-$VERSION/conf/geomesa-env.sh.
+
+If desired, you may use the included script ``bin/geomesa-hbase configure`` to help set up the environment variables
+used by the tools. Otherwise, you may invoke the ``geomesa-hbase`` script using the fully-qualified path, and
+use the default configuration.
+
+The tools will read the ``$HBASE_HOME`` and ``$HADOOP_HOME`` environment variables to load the
+appropriate JAR files for HBase and Hadoop. If installing on a system without HBase and/or Hadoop,
+the ``install-hbase.sh`` and ``install-hadoop.sh`` scripts in the ``bin`` directory may be used to download
+the required HBase and Hadoop JARs into the ``lib`` directory. You should edit this script to match the versions
+used by your installation.
+
+.. note::
+
+    See :ref:`slf4j_configuration` for information about configuring the SLF4J implementation.
+
+.. note::
+
+    GeoMesa provides the ability to provide additional jars on the classpath using the environmental variable
+    ``$GEOMESA_EXTRA_CLASSPATHS``. GeoMesa will prepend the contents of this environmental variable  to the computed
+    classpath giving it highest precedence in the classpath. Users can provide directories of jar files or individual
+    files using a colon (``:``) as a delimiter. These entries will also be added the the map-reduce libjars variable.
+    Use the ``geomesa-hbase classpath`` command to print the final classpath that will be used when executing geomesa
+    commands.
+
+The tools also need access to the ``hbase-site.xml`` for your cluster. If ``$HBASE_HOME`` is defined, it will pick
+it up from there. However, it may not be available for map/reduce jobs. To ensure it's availability,
+add it at the root level of the ``geomesa-hbase-datastore`` JAR in the lib folder:
 
 .. code-block:: bash
 
-    hadoop fs -put ${GEOMESA_HBASE_HOME}/dist/hbase/geomesa-hbase-distributed-runtime-$VERSION.jar ${hbase.dynamic.jars.dir}/
+    $ zip -r lib/geomesa-hbase-datastore_2.11-$VERSION.jar hbase-site.xml
 
-If running on top of Amazon S3, you will need to use the ``aws s3`` command line tool.
+.. warning::
+
+    Ensure that the ``hbase-site.xml`` is at the root (top) level of your JAR, otherwise it will not be picked up.
+
+Due to licensing restrictions, certain dependencies for shape file support must be separately
+installed. Do this with the following commands:
 
 .. code-block:: bash
 
-    aws s3 cp ${GEOMESA_HBASE_HOME}/dist/hbase/geomesa-hbase-distributed-runtime-$VERSION.jar s3://${hbase.dynamic.jars.dir}/
+    $ bin/install-jai.sh
+    $ bin/install-jline.sh
 
-If required, you may disable distributed processing by setting the system property ``geomesa.hbase.remote.filtering``
-to ``false``. Note that this may have an adverse effect on performance.
+Test the command that invokes the GeoMesa Tools:
 
-.. _hbase_install_source:
+.. code::
 
-Building from Source
---------------------
+    $ bin/geomesa-hbase
+    INFO  Usage: geomesa-hbase [command] [command options]
+      Commands:
+      ...
 
-GeoMesa HBase may also be built from source. For more information refer to :ref:`building_from_source`
-in the developer manual, or to the ``README.md`` file in the the source distribution.
-The remainder of the instructions in this chapter assume the use of the binary GeoMesa HBase
-distribution. If you have built from source, the distribution is created in the ``target`` directory of
-``geomesa-hbase/geomesa-hbase-dist``.
+For more details, see :ref:`hbase_tools`.
 
-More information about developing with GeoMesa may be found in the :doc:`/developer/index`.
-
-.. _registering_coprocessors:
-
-Register the Coprocessors
--------------------------
-
-GeoMesa utilizes server side processing to accelerate some queries. Currently the only processing done server side is
-density (heatmap) calculations. In order to utilize this feature the GeoMesa coprocessor must be registered on all GeoMesa tables
-or registered site-wide and the ``geomesa-hbase-distributed-runtime`` code must be available on the classpath or at an
-HDFS url, depending on the registration method used.
-
-There are a number of ways to register the coprocessors, which are detailed later.
-
-The following ways to register coprocessors can be done anytime and constitute the 'upgrade path', however, they may
-require HBase or tables to be taken offline.
-
- * Register Site-Wide using the ``hbase-site.xml``
- * Register Per-Table using the ``hbase shell``
-
-The following ways to register coprocessors must be done **before** the tables are created.
-
- * Classpath Auto-Registration
- * System Property or geomesa-site.xml
- * DataStore Param Registration
-
-There are two ways to get the coprocessor code on the classpath.
-
- * Modify the ``hbase-env.sh`` file and provide the path to the ``geomesa-hbase-distributed-runtime`` JAR in the
-   ``HBASE_CLASSPATH`` property. If this method is used, the ``geomesa-hbase-distributed-runtime`` JAR must be available at
-   the given location on all master and region servers.
- * If registering the coprocessors on a per-table basis using the hbase shell, it is possible to provide the HDFS path to the
-   ``geomesa-hbase-distributed-runtime`` JAR that was deployed in :ref:`hbase_deploy_distributed_runtime`.
-
-.. tabs::
-
-    .. tab:: Site-Wide
-
-        The easiest method to register the coprocessors is to specify the coprocessors in the ``hbase-site.xml``.
-        To do this simply add the coprocessors classname to the ``hbase.coprocessor.user.region.classes`` key.
-
-        .. code-block:: xml
-
-            <configuration>
-              <property>
-                <name>hbase.coprocessor.user.region.classes</name>
-                <value>org.locationtech.geomesa.hbase.coprocessor.GeoMesaCoprocessor</value>
-              </property>
-            </configuration>
-
-        All new and existing non-system tables will have access to the GeoMesa Coprocessor.
-
-    .. tab:: Per-Table
-
-        If your hbase instance is used for more than GeoMesa table or would like to utilize HDFS to deploy the
-        ``geomesa-hbase-distributed-runtime`` JAR or for some other reason do not wish to register the coprocessor
-        site wide you may configure the coprocessor on a per-table basis. This can be done by utilizing the the hbase shell
-        as shown below. When specifying a coprocessor, the coprocessor must be available on the HBase classpath on all
-        of the master and region servers or you must provide the HDFS URL for the ``geomesa-hbase-distributed-runtime`` JAR that
-        was deployed in :ref:`hbase_deploy_distributed_runtime`.
-
-        To run the hbase shell simply execute:
-
-        .. code-block:: bash
-
-            $ ${HBASE_HOME}/bin/hbase shell
-            HBase Shell; enter 'help<RETURN>' for list of supported commands.
-            Type "exit<RETURN>" to leave the HBase Shell
-            hbase(main):001:0>
-
-        To get a list of the current tables run:
-
-        .. code-block:: bash
-
-            hbase(main):001:0> list
-            TABLE
-            geomesa
-            geomesa_QuickStart_id
-            geomesa_QuickStart_z2
-            geomesa_QuickStart_z3
-            4 row(s) in 0.1380 seconds
-
-        You will need to install the coprocessor on all table indexes list. The ``geomesa`` table in this example is the metadata
-        table and does not need the coprocessor installed.
-
-        We use the ``alter`` command to modify the configuration of the tables. The ``coprocessor`` parameter in the ``alter``
-        command may be modified to change the registration of the GeoMesa coprocessors.
-
-        .. code-block:: bash
-
-            'coprocessor'=>'HDFS_URL|org.locationtech.geomesa.hbase.coprocessor.GeoMesaCoprocessor|PRIORITY|'
-
-        The 'value' of the ``coprocessor`` parameter has four parts, separated by ``|``, two of which, ``HDFS_URL`` and
-        ``PRIORITY``, are configurable depending on your environment.
-
-         * To provide the HDFS URL of the ``geomesa-hbase-distributed-runtime`` JAR replace HDFS_URL in the coprocessor value with the
-           HDFS URL. This is only need if the ``geomesa-hbase-distributed-runtime`` JAR will not be on the classpath by other means.
-         * To alter the priority (execution order) of the coprocessor change PRIRORITY to the desired value, this is optional and
-           should be left blank if now used.
-
-        .. code-block:: bash
-
-            hbase(main):040:0> alter 'geomesa_QuickStart_id', METHOD => 'table_att', 'coprocessor'=>'|org.locationtech.geomesa.hbase.coprocessor.GeoMesaCoprocessor||'
-            Updating all regions with the new schema...
-            22/22 regions updated.
-            Done.
-            0 row(s) in 5.0000 seconds
-
-            hbase(main):041:0> alter 'geomesa_QuickStart_z2', METHOD => 'table_att', 'coprocessor'=>'|org.locationtech.geomesa.hbase.coprocessor.GeoMesaCoprocessor||'
-            Updating all regions with the new schema...
-            4/4 regions updated.
-            Done.
-            0 row(s) in 2.8850 seconds
-
-            hbase(main):042:0> alter 'geomesa_QuickStart_z3', METHOD => 'table_att', 'coprocessor'=>'|org.locationtech.geomesa.hbase.coprocessor.GeoMesaCoprocessor||'
-            Updating all regions with the new schema...
-            4/4 regions updated.
-            Done.
-            0 row(s) in 2.9150 seconds
-
-        To verify this worked successfully, run:
-
-        .. code-block:: bash
-
-            hbase(main):002:0> describe 'TABLE_NAME'
-            Table TABLE_NAME is ENABLED
-            TABLE_NAME, {TABLE_ATTRIBUTES => {coprocessor$1 => '|org.locationtech.geomesa.hbase.coprocessor.GeoMesaCoprocessor||'}
-            COLUMN FAMILIES DESCRIPTION
-            {NAME => 'm', BLOOMFILTER => 'ROW', VERSIONS => '1', IN_MEMORY => 'false', KEEP_DELETED_CELLS => 'FALSE', DATA_BLOCK_EN
-            CODING => 'NONE', TTL => 'FOREVER', COMPRESSION => 'NONE', MIN_VERSIONS => '0', BLOCKCACHE => 'true', BLOCKSIZE => '655
-            36', REPLICATION_SCOPE => '0'}
-            1 row(s) in 0.1940 seconds
-
-    .. tab:: Classpath
-
-        If the ``geomesa-hbase-distributed-runtime`` JAR is available on the HBase classpath when the table is created then the
-        GeoMesa coprocessors will be automatically registered for that table.
-
-    .. tab:: System-Property
-
-        System Property or geomesa-site.xml are essentially the same as they utilize the same mechanism, but two
-        different approaches.
-
-        If the Java system property ``geomesa.hbase.coprocessor.path`` is set in the environment running the GeoMesa ingest
-        then the HDFS or S3 URL provided as the value will be automatically registered in the table descriptor. There are three
-        to do this.
-
-        * Set the system property in your shell environment using the ``JAVA_TOOL_OPTIONS`` environment variable.
-
-        .. code-block:: bash
-
-            export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS} -Dgeomesa.hbase.coprocessor.path=hdfs://path/to/geomesa-runtime.jar"
-
-        * Set the system property in the ``geomesa-env.sh`` script.
-
-        .. code-block:: bash
-
-            setvar CUSTOM_JAVA_OPTS "${JAVA_OPTS} -Dgeomesa.hbase.coprocessor.path=hdfs://path/to/geomesa-runtime.jar"
-
-        * Set the system property using the ``geomesa-site.xml`` configuration file.
-
-        .. code-block:: xml
-
-            <property>
-                <name>geomesa.hbase.coprocessor.path</name>
-                <value>hdfs://path/to/geomesa-runtime.jar</value>
-                <description>HDFS or local path to GeoMesa-HBase Coprocessor JAR. If a local path is provided it must be the same for
-                    all region server. A path provided through the DataStore parameters will always override this property.
-                </description>
-                <final>false</final>
-            </property>
-
-    .. tab:: DS-Parameter
-
-        If you are using GeoMesa-HBase programmatically you can use the datastore parameter ``coprocessor.url`` to set an HDFS or
-        S3 path to the ``geomesa-hbase-distributed-runtime`` JAR.
-
-For more information on managing coprocessors see
-`Coprocessor Introduction <https://blogs.apache.org/hbase/entry/coprocessor_introduction>`_ on Apache's Blog.
+.. _install_hbase_geoserver:
 
 Installing GeoMesa HBase in GeoServer
 -------------------------------------
 
+.. warning::
+
+   GeoServer 2.13.0 and 2.13.1 are not recommended due to two serious bugs:
+     * GeoMesa WPS processes are not triggered correctly, and will run slowly or not at all
+     * GeoMesa count optimizations are bypassed, potentially resulting in large duplicate scans for WFS queries
+
 The HBase GeoServer plugin is bundled by default in a GeoMesa binary distribution. To install, extract
 ``$GEOMESA_HBASE_HOME/dist/gs-plugins/geomesa-hbase-gs-plugin_2.11-$VERSION-install.tar.gz`` into GeoServer's
-``WEB-INF/lib`` directory. Note that this plugin contains a shaded JAR with HBase 1.2.3
-bundled. If you require a different version, modify the ``pom.xml`` and build the GeoMesa HBase plugin project from
-scratch with Maven.
+``WEB-INF/lib`` directory. Note that this plugin contains a shaded JAR with HBase |hbase_bundled_version|
+bundled. This JAR should work with HBase |hbase_version|.
 
 This distribution does not include the Hadoop or Zookeeper JARs; the following JARs
 should be copied from the ``lib`` directory of your HBase or Hadoop installations into
@@ -371,24 +296,20 @@ GeoServer's ``WEB-INF/lib`` directory:
 
     .. group-tab:: Standard
 
-        * hadoop-annotations-2.7.4.jar
-        * hadoop-auth-2.7.4.jar
-        * hadoop-common-2.7.4.jar
-        * hadoop-mapreduce-client-core-2.7.4.jar
-        * hadoop-yarn-api-2.7.4.jar
-        * hadoop-yarn-common-2.7.4.jar
-        * htrace-core-3.1.0-incubating.jar
         * commons-cli-1.2.jar
-        * commons-io-2.5.jar (you may need to remove an older version (2.1) from geoserver)
-        * hbase-common-1.2.6.jar
-        * hbase-client-1.2.6.jar
-        * hbase-server-1.2.6.jar
-        * hbase-protocol-1.2.6.jar
+        * commons-configuration-1.6.jar
+        * commons-io-2.5.jar  (you may need to remove an older version from geoserver)
+        * commons-logging-1.1.3.jar
+        * hadoop-auth-2.7.4.jar
+        * hadoop-client-2.7.4.jar
+        * hadoop-common-2.7.4.jar
+        * hadoop-hdfs-2.7.4.jar
+        * htrace-core-3.1.0-incubating.jar
         * metrics-core-2.2.0.jar
         * netty-3.6.2.Final.jar
         * netty-all-4.0.41.Final.jar
+        * servlet-api-2.4.jar
         * zookeeper-3.4.10.jar
-        * commons-configuration-1.6.jar
 
         You can use the bundled ``$GEOMESA_HBASE_HOME/bin/install-hadoop.sh`` script to install these JARs.
 
@@ -399,13 +320,12 @@ GeoServer's ``WEB-INF/lib`` directory:
         * hadoop-common.jar
         * protobuf-java.jar
         * commons-io.jar
-        * hbase-server-1.2.6.jar
         * zookeeper-3.4.10.jar
         * commons-configuration-1.6.jar
 
 The HBase data store requires the configuration file ``hbase-site.xml`` to be on the classpath. This can
 be accomplished by placing the file in ``geoserver/WEB-INF/classes`` (you should make the directory if it
-doesn't exist). Utilizing a symbolic link will be use full here so any changes are reflected in GeoServer.
+doesn't exist). Utilizing a symbolic link will be useful here so any changes are reflected in GeoServer.
 
 .. tabs::
 
@@ -458,3 +378,15 @@ Then start up the Spark shell:
 .. code-block:: shell
 
     spark-shell --jars $SPARK_JARS
+
+Configuring HBase on Azure HDInsight
+------------------------------------
+
+HDInsight generally creates ``HBASE_HOME`` in HDFS under the path ``/hbase``. In order to make the GeoMesa
+coprocessors and filters available to the region servers, use the ``hadoop`` filesystem command to put
+the GeoMesa JAR there:
+
+.. code-block:: shell
+
+    hadoop fs -mkdir /hbase/lib
+    hadoop fs -put geomesa-hbase-distributed-runtime-$VERSION.jar /hbase/lib/

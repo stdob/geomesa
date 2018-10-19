@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -18,7 +18,6 @@ import org.geotools.factory.Hints
 import org.locationtech.geomesa.accumulo.AccumuloFeatureIndexType
 import org.locationtech.geomesa.features.ScalaSimpleFeature
 import org.locationtech.geomesa.index.iterators.StatsScan
-import org.locationtech.geomesa.index.utils.KryoLazyStatsUtils
 import org.locationtech.geomesa.utils.geotools.GeometryUtils
 import org.locationtech.geomesa.utils.stats._
 import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
@@ -45,12 +44,12 @@ object KryoLazyStatsIterator extends LazyLogging {
                 priority: Int = DEFAULT_PRIORITY): IteratorSetting = {
     val is = new IteratorSetting(priority, "stats-iter", classOf[KryoLazyStatsIterator])
     BaseAggregatingIterator.configure(is, deduplicate, None)
-    StatsScan.configure(sft, index, filter, hints) .foreach { case (k, v) => is.addOption(k, v) }
+    StatsScan.configure(sft, index, filter, hints).foreach { case (k, v) => is.addOption(k, v) }
     is
   }
 
   def kvsToFeatures(): (Entry[Key, Value]) => SimpleFeature = {
-    val sf = new ScalaSimpleFeature(KryoLazyStatsUtils.StatsSft, "")
+    val sf = new ScalaSimpleFeature(StatsScan.StatsSft, "")
     sf.setAttribute(1, GeometryUtils.zeroPoint)
     (e: Entry[Key, Value]) => {
       // value is the already serialized stat

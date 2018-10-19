@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -36,15 +36,15 @@ class SeqStatTest extends Specification with StatTestHelper {
       val eh = stat.stats(2).asInstanceOf[EnumerationStat[java.lang.Long]]
       val rh = stat.stats(3).asInstanceOf[Histogram[java.lang.Double]]
 
-      mm.attribute mustEqual intIndex
+      mm.property mustEqual "intAttr"
       mm.isEmpty must beTrue
 
       ic.counter mustEqual 1
 
-      eh.attribute mustEqual longIndex
+      eh.property mustEqual "longAttr"
       eh.enumeration must beEmpty
 
-      rh.attribute mustEqual doubleIndex
+      rh.property mustEqual "doubleAttr"
       forall(0 until rh.length)(rh.count(_) mustEqual 0)
     }
 
@@ -174,15 +174,15 @@ class SeqStatTest extends Specification with StatTestHelper {
       val eh = stat.stats(2).asInstanceOf[EnumerationStat[java.lang.Long]]
       val rh = stat.stats(3).asInstanceOf[Histogram[java.lang.Double]]
 
-      mm.attribute mustEqual intIndex
+      mm.property mustEqual "intAttr"
       mm.isEmpty must beTrue
 
       ic.counter mustEqual 1
 
-      eh.attribute mustEqual longIndex
+      eh.property mustEqual "longAttr"
       eh.enumeration must beEmpty
 
-      rh.attribute mustEqual doubleIndex
+      rh.property mustEqual "doubleAttr"
       forall(0 until rh.length)(rh.count(_) mustEqual 0)
     }
   }

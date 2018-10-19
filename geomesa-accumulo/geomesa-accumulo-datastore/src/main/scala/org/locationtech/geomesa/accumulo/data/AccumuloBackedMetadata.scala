@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -13,19 +13,14 @@ import org.apache.accumulo.core.data.{Mutation, Range, Value}
 import org.apache.hadoop.io.Text
 import org.locationtech.geomesa.accumulo.AccumuloVersion
 import org.locationtech.geomesa.accumulo.util.GeoMesaBatchWriterConfig
-import org.locationtech.geomesa.index.metadata.{CachedLazyMetadata, GeoMesaMetadata, MetadataAdapter, MetadataSerializer}
+import org.locationtech.geomesa.index.metadata.{CachedLazyBinaryMetadata, GeoMesaMetadata, MetadataSerializer}
 import org.locationtech.geomesa.utils.collection.CloseableIterator
 import org.locationtech.geomesa.utils.io.{CloseQuietly, CloseWithLogging}
 
 import scala.collection.JavaConversions._
 
 class AccumuloBackedMetadata[T](val connector: Connector, val catalog: String, val serializer: MetadataSerializer[T])
-    extends GeoMesaMetadata[T] with CachedLazyMetadata[T] with AccumuloMetadataAdapter
-
-trait AccumuloMetadataAdapter extends MetadataAdapter {
-
-  protected def catalog: String
-  protected def connector: Connector
+    extends GeoMesaMetadata[T] with CachedLazyBinaryMetadata[T] {
 
   protected val config: BatchWriterConfig = GeoMesaBatchWriterConfig().setMaxMemory(10000L).setMaxWriteThreads(2)
 
@@ -52,8 +47,6 @@ trait AccumuloMetadataAdapter extends MetadataAdapter {
     writer.flush()
   }
 
-  override protected def delete(row: Array[Byte]): Unit = delete(Seq(row))
-
   override protected def delete(rows: Seq[Array[Byte]]): Unit = {
     val ranges = rows.map(r => Range.exact(new Text(r)))
     val deleter = connector.createBatchDeleter(catalog, AccumuloVersion.getEmptyAuths, 1, config)
@@ -77,12 +70,12 @@ trait AccumuloMetadataAdapter extends MetadataAdapter {
     }
   }
 
-  override protected def scanRows(prefix: Option[Array[Byte]]): CloseableIterator[Array[Byte]] = {
+  override protected def scanRows(prefix: Option[Array[Byte]]): CloseableIterator[(Array[Byte], Array[Byte])] = {
     // ensure we don't scan any single-row encoded values
     val range = prefix.map(p => Range.prefix(new Text(p))).getOrElse(new Range("", "~"))
     val scanner = connector.createScanner(catalog, AccumuloVersion.getEmptyAuths)
     scanner.setRange(range)
-    CloseableIterator(scanner.iterator.map(_.getKey.getRow.copyBytes), scanner.close())
+    CloseableIterator(scanner.iterator.map(r => (r.getKey.getRow.copyBytes, r.getValue.get)), scanner.close())
   }
 
   override def close(): Unit = synchronized {

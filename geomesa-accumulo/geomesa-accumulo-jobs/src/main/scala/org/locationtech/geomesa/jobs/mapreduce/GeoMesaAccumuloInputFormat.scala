@@ -1,6 +1,6 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
- * Portions Crown Copyright (c) 2017 Dstl
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
+ * Portions Crown Copyright (c) 2017-2018 Dstl
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -103,7 +103,8 @@ object GeoMesaAccumuloInputFormat extends LazyLogging {
     val queryPlan = AccumuloJobUtils.getSingleQueryPlan(ds, query)
 
     // use the query plan to set the accumulo input format options
-    InputFormatBase.setInputTableName(job, queryPlan.table)
+    // note: we've ensured that there is only a single table in `getSingleQueryPlan`
+    InputFormatBase.setInputTableName(job, queryPlan.tables.head)
     if (queryPlan.ranges.nonEmpty) {
       InputFormatBase.setRanges(job, queryPlan.ranges)
     }
@@ -118,7 +119,7 @@ object GeoMesaAccumuloInputFormat extends LazyLogging {
     val conf = job.getConfiguration
 
     GeoMesaConfigurator.setSerialization(conf)
-    GeoMesaConfigurator.setTable(conf, queryPlan.table)
+    GeoMesaConfigurator.setTable(conf, queryPlan.tables.head)
     GeoMesaConfigurator.setDataStoreInParams(conf, dsParams)
     GeoMesaConfigurator.setFeatureType(conf, featureTypeName)
     if (query.getFilter != Filter.INCLUDE) {
@@ -164,10 +165,10 @@ class GeoMesaAccumuloInputFormat extends InputFormat[Text, SimpleFeature] with L
 
   val delegate = new AccumuloInputFormat
 
-  var sft: SimpleFeatureType = null
-  var table: AccumuloFeatureIndex = null
+  var sft: SimpleFeatureType = _
+  var table: AccumuloFeatureIndex = _
 
-  private def init(context: JobContext) = if (sft == null) {
+  private def init(context: JobContext): Unit = if (sft == null) {
     val conf = context.getConfiguration
     val params = new CaseInsensitiveMap(GeoMesaConfigurator.getDataStoreInParams(conf)).asInstanceOf[java.util.Map[String, String]]
 
@@ -208,7 +209,7 @@ class GeoMesaAccumuloInputFormat extends InputFormat[Text, SimpleFeature] with L
 
       // Unwrap token and build connector
       hadoopWrappedToken match {
-        case Some(hwt) => {
+        case Some(hwt) =>
           val identifier = new AuthenticationTokenIdentifier
           val token =  try {
             // Convert to DelegationToken.
@@ -232,15 +233,15 @@ class GeoMesaAccumuloInputFormat extends InputFormat[Text, SimpleFeature] with L
 
           // Get datastore using updated params
           DataStoreFinder.getDataStore(new CaseInsensitiveMap(updatedParams).asInstanceOf[java.util.Map[_, _]]).asInstanceOf[AccumuloDataStore]
-        }
+
         case _ => throw new IllegalArgumentException("Could not find Hadoop-wrapped Accumulo token in JobContext credentials or Hadoop configuration")
       }
     }
 
     sft = ds.getSchema(GeoMesaConfigurator.getFeatureType(conf))
     val tableName = GeoMesaConfigurator.getTable(conf)
-    table = AccumuloFeatureIndex.indices(sft, IndexMode.Read)
-        .find(t => t.getTableName(sft.getTypeName, ds) == tableName)
+    table = AccumuloFeatureIndex.indices(sft, mode = IndexMode.Read)
+        .find(t => t.getTableNames(sft, ds, None).contains(tableName))
         .getOrElse(throw new RuntimeException(s"Couldn't find input table $tableName"))
     ds.dispose()
   }
@@ -326,16 +327,16 @@ class GeoMesaRecordReader(sft: SimpleFeatureType,
                           decoder: org.locationtech.geomesa.features.SimpleFeatureSerializer)
     extends RecordReader[Text, SimpleFeature] {
 
-  var currentFeature: SimpleFeature = null
+  var currentFeature: SimpleFeature = _
 
-  val getId = table.getIdFromRow(sft)
+  private val getId = table.getIdFromRow(sft)
 
-  override def initialize(split: InputSplit, context: TaskAttemptContext) = {
+  override def initialize(split: InputSplit, context: TaskAttemptContext): Unit =
     reader.initialize(split, context)
-  }
-  override def getProgress = reader.getProgress
 
-  override def nextKeyValue() = nextKeyValueInternal()
+  override def getProgress: Float = reader.getProgress
+
+  override def nextKeyValue(): Boolean = nextKeyValueInternal()
 
   /**
     * Get the next key value from the underlying reader, incrementing the reader when required
@@ -345,7 +346,8 @@ class GeoMesaRecordReader(sft: SimpleFeatureType,
       currentFeature = decoder.deserialize(reader.getCurrentValue.get())
       if (!hasId) {
         val row = reader.getCurrentKey.getRow
-        currentFeature.getIdentifier.asInstanceOf[FeatureIdImpl].setID(getId(row.getBytes, 0, row.getLength))
+        val id = getId(row.getBytes, 0, row.getLength, currentFeature)
+        currentFeature.getIdentifier.asInstanceOf[FeatureIdImpl].setID(id)
       }
       true
     } else {
@@ -353,11 +355,11 @@ class GeoMesaRecordReader(sft: SimpleFeatureType,
     }
   }
 
-  override def getCurrentValue = currentFeature
+  override def getCurrentValue: SimpleFeature = currentFeature
 
-  override def getCurrentKey = new Text(currentFeature.getID)
+  override def getCurrentKey: Text = new Text(currentFeature.getID)
 
-  override def close() = { reader.close() }
+  override def close(): Unit = reader.close()
 }
 
 /**

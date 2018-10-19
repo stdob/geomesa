@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -18,7 +18,7 @@ import org.apache.commons.io.FilenameUtils
 object DataFormats extends Enumeration {
 
   type DataFormat = Value
-  val Arrow, Avro, Bin, Csv, GeoJson, Gml, Json, Null, Shp, Tsv = Value
+  val Arrow, Avro, Bin, Csv, GeoJson, Gml, Json, Leaflet , Null, Shp, Tsv, Xml = Value
 
   /**
     * Returns either the format, or the extension as a string if it doesn't match
@@ -37,7 +37,8 @@ object DataFormats extends Enumeration {
     val extension = FilenameUtils.getExtension(filename).toLowerCase(Locale.US)
     values.find(_.toString.equalsIgnoreCase(extension)) match {
       case Some(f) => Right(f)
-      case None    => Left(extension)
+      case None if extension == "html" =>  Right(Leaflet)
+      case _ => Left(extension)
     }
   }
 }

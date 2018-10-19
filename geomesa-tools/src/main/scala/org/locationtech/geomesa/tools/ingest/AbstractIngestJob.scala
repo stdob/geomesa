@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -11,7 +11,6 @@ package org.locationtech.geomesa.tools.ingest
 import java.io.File
 
 import com.typesafe.scalalogging.LazyLogging
-import org.apache.commons.io.IOUtils
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.io.{LongWritable, Text}
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormat
@@ -19,52 +18,32 @@ import org.apache.hadoop.mapreduce.{Job, JobStatus, Mapper}
 import org.geotools.data.DataUtilities
 import org.geotools.factory.Hints
 import org.locationtech.geomesa.features.ScalaSimpleFeature
-import org.locationtech.geomesa.jobs.mapreduce.GeoMesaOutputFormat
-import org.locationtech.geomesa.jobs.{GeoMesaConfigurator, JobUtils}
+import org.locationtech.geomesa.jobs.GeoMesaConfigurator
+import org.locationtech.geomesa.jobs.mapreduce.{GeoMesaOutputFormat, JobWithLibJars}
 import org.locationtech.geomesa.tools.Command
 import org.locationtech.geomesa.tools.ingest.AbstractIngest.StatusCallback
-import org.locationtech.geomesa.utils.classpath.ClassPathUtils
 import org.opengis.feature.simple.SimpleFeature
-
-import scala.collection.JavaConversions._
-import scala.util.control.NonFatal
 
 /**
  * Abstract class that handles configuration and tracking of the remote job
  */
-abstract class AbstractIngestJob {
+abstract class AbstractIngestJob(dsParams: Map[String, String],
+                                 typeName: String,
+                                 paths: Seq[String],
+                                 libjarsFile: String,
+                                 libjarsPaths: Iterator[() => Seq[File]]) extends JobWithLibJars {
 
   def inputFormatClass: Class[_ <: FileInputFormat[_, SimpleFeature]]
-  def configureJob(job: Job): Unit
   def written(job: Job): Long
   def failed(job: Job): Long
 
-  def run(dsParams: Map[String, String],
-          typeName: String,
-          paths: Seq[String],
-          libjarsFile: String,
-          libjarsPaths: Iterator[() => Seq[File]],
-          statusCallback: StatusCallback): (Long, Long) = {
+  def run(statusCallback: StatusCallback): (Long, Long) = {
 
     val job = Job.getInstance(new Configuration, "GeoMesa Tools Ingest")
 
-    JobUtils.setLibJars(job.getConfiguration, readLibJars(libjarsFile), defaultSearchPath ++ libjarsPaths)
+    setLibJars(job, libjarsFile, libjarsPaths)
 
-    job.setJarByClass(getClass)
-    job.setMapperClass(classOf[IngestMapper])
-    job.setInputFormatClass(inputFormatClass)
-    job.setOutputFormatClass(classOf[GeoMesaOutputFormat])
-    job.setMapOutputKeyClass(classOf[Text])
-    job.setOutputValueClass(classOf[ScalaSimpleFeature])
-    job.setNumReduceTasks(0)
-    job.getConfiguration.set("mapred.reduce.tasks.speculative.execution", "false")
-    job.getConfiguration.set("mapreduce.job.user.classpath.first", "true")
-
-    FileInputFormat.setInputPaths(job, paths.mkString(","))
     configureJob(job)
-
-    GeoMesaConfigurator.setFeatureTypeOut(job.getConfiguration, typeName)
-    GeoMesaOutputFormat.configureDataStore(job, dsParams)
 
     Command.user.info("Submitting job - please wait...")
     job.submit()
@@ -88,22 +67,23 @@ abstract class AbstractIngestJob {
     (written(job), failed(job))
   }
 
-  protected def readLibJars(file: String): java.util.List[String] = {
-    val is = getClass.getClassLoader.getResourceAsStream(file)
-    try {
-      IOUtils.readLines(is)
-    } catch {
-      case NonFatal(e) => throw new Exception("Error reading ingest libjars", e)
-    } finally {
-      IOUtils.closeQuietly(is)
-    }
-  }
+  def configureJob(job: Job): Unit = {
+    job.setJarByClass(getClass)
+    job.setMapperClass(classOf[IngestMapper])
+    job.setInputFormatClass(inputFormatClass)
+    job.setOutputFormatClass(classOf[GeoMesaOutputFormat])
+    job.setMapOutputKeyClass(classOf[Text])
+    job.setOutputValueClass(classOf[ScalaSimpleFeature])
+    job.setNumReduceTasks(0)
+    job.getConfiguration.set("mapred.map.tasks.speculative.execution", "false")
+    job.getConfiguration.set("mapred.reduce.tasks.speculative.execution", "false")
+    job.getConfiguration.set("mapreduce.job.user.classpath.first", "true")
 
-  protected def defaultSearchPath: Iterator[() => Seq[File]] =
-    Iterator(
-      () => ClassPathUtils.getJarsFromClasspath(getClass),
-      () => ClassPathUtils.getFilesFromSystemProperty("geomesa.convert.scripts.path")
-    )
+    FileInputFormat.setInputPaths(job, paths.mkString(","))
+
+    GeoMesaConfigurator.setFeatureTypeOut(job.getConfiguration, typeName)
+    GeoMesaOutputFormat.configureDataStore(job, dsParams)
+  }
 }
 
 /**

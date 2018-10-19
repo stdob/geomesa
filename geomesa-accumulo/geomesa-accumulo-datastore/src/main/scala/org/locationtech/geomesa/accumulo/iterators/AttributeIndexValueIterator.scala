@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -19,7 +19,7 @@ import org.locationtech.geomesa.accumulo.index.AccumuloFeatureIndex
 import org.locationtech.geomesa.features.ScalaSimpleFeature
 import org.locationtech.geomesa.features.SerializationOption.SerializationOptions
 import org.locationtech.geomesa.features.kryo.{KryoBufferSimpleFeature, KryoFeatureSerializer}
-import org.locationtech.geomesa.index.index.AttributeIndex.AttributeRowDecoder
+import org.locationtech.geomesa.index.index.attribute.AttributeIndex.AttributeRowDecoder
 import org.locationtech.geomesa.index.iterators.IteratorCache
 import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes
 import org.opengis.feature.simple.SimpleFeatureType
@@ -88,7 +88,7 @@ class AttributeIndexValueIterator extends SortedKeyValueIterator[Key, Value] wit
     // noinspection ScalaDeprecation
     setId = if (index.serializedWithId || cql.isEmpty) { (_) => {} } else {
       val getFromRow = index.getIdFromRow(sft)
-      (row) => original.setId(getFromRow(row.getBytes, 0, row.getLength))
+      (row) => original.setId(getFromRow(row.getBytes, 0, row.getLength, original))
     }
   }
 

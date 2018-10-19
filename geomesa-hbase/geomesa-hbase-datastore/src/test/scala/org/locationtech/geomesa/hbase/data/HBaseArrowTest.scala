@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -12,6 +12,7 @@ import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
 
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
+import org.apache.hadoop.hbase.filter.FilterList
 import org.geotools.data.{DataStoreFinder, Query, Transaction}
 import org.geotools.filter.text.ecql.ECQL
 import org.locationtech.geomesa.arrow.io.SimpleFeatureArrowFileReader
@@ -25,6 +26,8 @@ import org.locationtech.geomesa.utils.io.WithClose
 import org.opengis.filter.Filter
 
 class HBaseArrowTest extends HBaseTest with LazyLogging  {
+
+  import scala.collection.JavaConverters._
 
   implicit val allocator: BufferAllocator = new RootAllocator(Long.MaxValue)
 
@@ -170,7 +173,9 @@ class HBaseArrowTest extends HBaseTest with LazyLogging  {
       query.getHints.put(QueryHints.ARROW_BATCH_SIZE, 5)
       foreach(ds.getQueryPlan(query)) { plan =>
         plan must beAnInstanceOf[CoprocessorPlan]
-        plan.asInstanceOf[CoprocessorPlan].remoteFilters.map(_._2.getClass) mustEqual Seq(classOf[Z3HBaseFilter])
+        plan.scans.head.getFilter must beAnInstanceOf[FilterList]
+        val filters = plan.scans.head.getFilter.asInstanceOf[FilterList].getFilters
+        filters.asScala.map(_.getClass) must contain(classOf[Z3HBaseFilter])
       }
       val results = SelfClosingIterator(ds.getFeatureReader(query, Transaction.AUTO_COMMIT))
       val out = new ByteArrayOutputStream

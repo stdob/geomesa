@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -18,6 +18,7 @@ import org.locationtech.geomesa.arrow.vector.{ArrowDictionary, SimpleFeatureVect
 import org.locationtech.geomesa.arrow.{ArrowEncodedSft, ArrowProperties}
 import org.locationtech.geomesa.features.ScalaSimpleFeature
 import org.locationtech.geomesa.index.api.{GeoMesaFeatureIndex, QueryPlan}
+import org.locationtech.geomesa.index.conf.QueryHints
 import org.locationtech.geomesa.index.iterators.ArrowScan._
 import org.locationtech.geomesa.index.stats.GeoMesaStats
 import org.locationtech.geomesa.utils.cache.SoftThreadLocalCache
@@ -49,14 +50,15 @@ trait ArrowScan extends AggregatingScan[ArrowAggregate] {
       case Some(tsft) => (tsft, options(TransformSchemaOpt))
       case None       => (sft, options(SftOpt))
     }
-    val includeFids = options(IncludeFidsKey)
+    val includeFids = options(IncludeFidsKey).toBoolean
+    val proxyFids = options.get(ProxyFidsKey).exists(_.toBoolean)
     val dictionary = options(DictionaryKey)
     val sort = options.get(SortKey).map(name => (name, options.get(SortReverseKey).exists(_.toBoolean)))
 
     val cacheKey = typ + arrowSftString + includeFids + dictionary + sort
 
     def create(): ArrowAggregate = {
-      val encoding = SimpleFeatureEncoding.min(includeFids.toBoolean)
+      val encoding = SimpleFeatureEncoding.min(includeFids, proxyFids)
       if (typ == Types.DeltaType) {
         val dictionaries = dictionary.split(",").filter(_.length > 0)
         new DeltaAggregate(arrowSft, dictionaries, encoding, sort, batchSize)
@@ -96,6 +98,7 @@ object ArrowScan {
   object Configuration {
 
     val IncludeFidsKey = "fids"
+    val ProxyFidsKey   = "proxy"
     val DictionaryKey  = "dict"
     val TypeKey        = "type"
     val BatchSizeKey   = "batch"
@@ -138,16 +141,41 @@ object ArrowScan {
     import AggregatingScan.{OptionToConfig, StringToConfig}
     import Configuration._
 
+    // handle sort from query
+    hints.getSortFields.foreach { sort =>
+      if (sort.lengthCompare(1) > 0) {
+        throw new IllegalArgumentException("Arrow queries only support sort by a single field: " +
+            hints.getSortReadableString)
+      } else if (sort.head._1.isEmpty) {
+        throw new IllegalArgumentException("Arrow queries only support sort by properties: " +
+            hints.getSortReadableString)
+      } else {
+        hints.getArrowSort match {
+          case None =>
+            hints.put(QueryHints.ARROW_SORT_FIELD, sort.head._1)
+            hints.put(QueryHints.ARROW_SORT_REVERSE, sort.head._2)
+          case Some(s) =>
+            if (s != sort.head) {
+              throw new IllegalArgumentException(s"Query sort does not match Arrow hints sort: " +
+                  s"${hints.getSortReadableString} != ${s._1}:${if (s._2) "DESC" else "ASC"}")
+            }
+        }
+        hints.remove(QueryHints.Internal.SORT_FIELDS)
+      }
+    }
+
     val arrowSft = hints.getTransformSchema.getOrElse(sft)
     val includeFids = hints.isArrowIncludeFid
+    val proxyFids = hints.isArrowProxyFid
     val sort = hints.getArrowSort
     val batchSize = getBatchSize(hints)
-    val encoding = SimpleFeatureEncoding.min(includeFids)
+    val encoding = SimpleFeatureEncoding.min(includeFids, proxyFids)
 
     val baseConfig = {
       val base = AggregatingScan.configure(sft, index, ecql, hints.getTransform, hints.getSampling)
       base ++ AggregatingScan.optionalMap(
         IncludeFidsKey -> includeFids.toString,
+        ProxyFidsKey   -> proxyFids.toString,
         SortKey        -> sort.map(_._1),
         SortReverseKey -> sort.map(_._2.toString),
         BatchSizeKey   -> batchSize.toString
@@ -157,9 +185,8 @@ object ArrowScan {
     val dictionaryFields = hints.getArrowDictionaryFields
     val providedDictionaries = hints.getArrowDictionaryEncodedValues(sft)
     val cachedDictionaries: Map[String, TopK[AnyRef]] = if (!hints.isArrowCachedDictionaries) { Map.empty } else {
-      def name(i: Int): String = sft.getDescriptor(i).getLocalName
       val toLookup = dictionaryFields.filterNot(providedDictionaries.contains)
-      stats.getStats[TopK[AnyRef]](sft, toLookup).map(k => name(k.attribute) -> k).toMap
+      stats.getStats[TopK[AnyRef]](sft, toLookup).map(k => k.property -> k).toMap
     }
 
     if (hints.isArrowDoublePass ||

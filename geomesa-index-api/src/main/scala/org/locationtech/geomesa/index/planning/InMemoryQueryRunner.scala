@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -21,9 +21,9 @@ import org.locationtech.geomesa.arrow.vector.SimpleFeatureVector
 import org.locationtech.geomesa.arrow.vector.SimpleFeatureVector.SimpleFeatureEncoding
 import org.locationtech.geomesa.features.{ScalaSimpleFeature, TransformSimpleFeature}
 import org.locationtech.geomesa.filter.factory.FastFilterFactory
-import org.locationtech.geomesa.index.iterators.{ArrowScan, DensityScan}
+import org.locationtech.geomesa.index.iterators.{ArrowScan, DensityScan, StatsScan}
 import org.locationtech.geomesa.index.stats.GeoMesaStats
-import org.locationtech.geomesa.index.utils.{Explainer, KryoLazyStatsUtils}
+import org.locationtech.geomesa.index.utils.{Explainer, Reprojection}
 import org.locationtech.geomesa.security.{AuthorizationsProvider, SecurityUtils, VisibilityEvaluator}
 import org.locationtech.geomesa.utils.bin.BinaryOutputEncoder
 import org.locationtech.geomesa.utils.bin.BinaryOutputEncoder.EncodingOptions
@@ -32,12 +32,11 @@ import org.locationtech.geomesa.utils.geotools.{GeometryUtils, GridSnap, SimpleF
 import org.locationtech.geomesa.utils.stats.{Stat, TopK}
 import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 import org.opengis.filter.Filter
-import org.opengis.filter.sort.SortBy
 
 abstract class InMemoryQueryRunner(stats: GeoMesaStats, authProvider: Option[AuthorizationsProvider])
     extends QueryRunner {
 
-  import InMemoryQueryRunner.{authVisibilityCheck, noAuthVisibilityCheck}
+  import InMemoryQueryRunner.{authVisibilityCheck, noAuthVisibilityCheck, transform}
   import org.locationtech.geomesa.index.conf.QueryHints.RichHints
 
   private val isVisible: (SimpleFeature, Seq[Array[Byte]]) => Boolean =
@@ -66,13 +65,18 @@ abstract class InMemoryQueryRunner(stats: GeoMesaStats, authProvider: Option[Aut
     explain(s"bin[${query.getHints.isBinQuery}] arrow[${query.getHints.isArrowQuery}] " +
         s"density[${query.getHints.isDensityQuery}] stats[${query.getHints.isStatsQuery}]")
     explain(s"Transforms: ${query.getHints.getTransformDefinition.getOrElse("None")}")
-    explain(s"Sort: ${Option(query.getSortBy).filter(_.nonEmpty).map(_.mkString(", ")).getOrElse("none")}")
+    explain(s"Sort: ${query.getHints.getSortReadableString}")
     explain.popLevel()
 
     val filter = Option(query.getFilter).filter(_ != Filter.INCLUDE)
     val iter = features(sft, filter).filter(isVisible(_, auths))
 
-    CloseableIterator(transform(iter, sft, query.getHints, filter, query.getSortBy))
+    val result = CloseableIterator(transform(iter, sft, stats, query.getHints, filter))
+
+    Reprojection(query) match {
+      case None    => result
+      case Some(r) => result.map(r.reproject)
+    }
   }
 
   override protected def optimizeFilter(sft: SimpleFeatureType, filter: Filter): Filter =
@@ -86,24 +90,29 @@ abstract class InMemoryQueryRunner(stats: GeoMesaStats, authProvider: Option[Aut
     } else if (hints.isDensityQuery) {
       DensityScan.DensitySft
     } else if (hints.isStatsQuery) {
-      KryoLazyStatsUtils.StatsSft
+      StatsScan.StatsSft
     } else {
       super.getReturnSft(sft, hints)
     }
   }
+}
 
-  private def transform(features: Iterator[SimpleFeature],
-                        sft: SimpleFeatureType,
-                        hints: Hints,
-                        filter: Option[Filter],
-                        sortBy: Array[SortBy]): Iterator[SimpleFeature] = {
+object InMemoryQueryRunner {
+
+  import org.locationtech.geomesa.index.conf.QueryHints.RichHints
+
+  def transform(features: Iterator[SimpleFeature],
+                sft: SimpleFeatureType,
+                stats: GeoMesaStats,
+                hints: Hints,
+                filter: Option[Filter]): Iterator[SimpleFeature] = {
     if (hints.isBinQuery) {
-      val trackId = Option(hints.getBinTrackIdField).map(sft.indexOf)
+      val trackId = Option(hints.getBinTrackIdField).filter(_ != "id").map(sft.indexOf)
       val geom = hints.getBinGeomField.map(sft.indexOf)
       val dtg = hints.getBinDtgField.map(sft.indexOf)
       binTransform(features, sft, trackId, geom, dtg, hints.getBinLabelField.map(sft.indexOf), hints.isBinSorting)
     } else if (hints.isArrowQuery) {
-      arrowTransform(features, sft, hints, filter)
+      arrowTransform(features, sft, stats, hints, filter)
     } else if (hints.isDensityQuery) {
       val Some(envelope) = hints.getDensityEnvelope
       val Some((width, height)) = hints.getDensityBounds
@@ -113,10 +122,10 @@ abstract class InMemoryQueryRunner(stats: GeoMesaStats, authProvider: Option[Aut
     } else {
       hints.getTransform match {
         case None =>
-          val sort = Option(sortBy).filter(_.length > 0).map(SimpleFeatureOrdering(sft, _))
+          val sort = hints.getSortFields.map(SimpleFeatureOrdering(sft, _))
           noTransform(sft, features, sort)
         case Some((defs, tsft)) =>
-          val sort = Option(sortBy).filter(_.length > 0).map(SimpleFeatureOrdering(tsft, _))
+          val sort = hints.getSortFields.map(SimpleFeatureOrdering(tsft, _))
           projectionTransform(features, sft, tsft, defs, sort)
       }
     }
@@ -145,6 +154,7 @@ abstract class InMemoryQueryRunner(stats: GeoMesaStats, authProvider: Option[Aut
 
   private def arrowTransform(original: Iterator[SimpleFeature],
                              sft: SimpleFeatureType,
+                             stats: GeoMesaStats,
                              hints: Hints,
                              filter: Option[Filter]): Iterator[SimpleFeature] = {
 
@@ -152,7 +162,7 @@ abstract class InMemoryQueryRunner(stats: GeoMesaStats, authProvider: Option[Aut
 
     val sort = hints.getArrowSort
     val batchSize = ArrowScan.getBatchSize(hints)
-    val encoding = SimpleFeatureEncoding.min(hints.isArrowIncludeFid)
+    val encoding = SimpleFeatureEncoding.min(hints.isArrowIncludeFid, hints.isArrowProxyFid)
 
     val (features, arrowSft) = hints.getTransform match {
       case None =>
@@ -170,9 +180,8 @@ abstract class InMemoryQueryRunner(stats: GeoMesaStats, authProvider: Option[Aut
     val dictionaryFields = hints.getArrowDictionaryFields
     val providedDictionaries = hints.getArrowDictionaryEncodedValues(sft)
     val cachedDictionaries: Map[String, TopK[AnyRef]] = if (!hints.isArrowCachedDictionaries) { Map.empty } else {
-      def name(i: Int): String = sft.getDescriptor(i).getLocalName
       val toLookup = dictionaryFields.filterNot(providedDictionaries.contains)
-      stats.getStats[TopK[AnyRef]](sft, toLookup).map(k => name(k.attribute) -> k).toMap
+      stats.getStats[TopK[AnyRef]](sft, toLookup).map(k => k.property -> k).toMap
     }
 
     if (hints.isArrowDoublePass ||
@@ -280,8 +289,8 @@ abstract class InMemoryQueryRunner(stats: GeoMesaStats, authProvider: Option[Aut
       case Some((tdefs, tsft)) => projectionTransform(features, sft, tsft, tdefs, None)
     }
     toObserve.foreach(stat.observe)
-    val encoded = if (encode) { KryoLazyStatsUtils.encodeStat(sft)(stat) } else { stat.toJson }
-    Iterator(new ScalaSimpleFeature(KryoLazyStatsUtils.StatsSft, "stat", Array(encoded, GeometryUtils.zeroPoint)))
+    val encoded = if (encode) { StatsScan.encodeStat(sft)(stat) } else { stat.toJson }
+    Iterator(new ScalaSimpleFeature(StatsScan.StatsSft, "stat", Array(encoded, GeometryUtils.zeroPoint)))
   }
 
   private def projectionTransform(features: Iterator[SimpleFeature],
@@ -315,9 +324,6 @@ abstract class InMemoryQueryRunner(stats: GeoMesaStats, authProvider: Option[Aut
       case Some(o) => features.toList.sorted(o).iterator
     }
   }
-}
-
-object InMemoryQueryRunner {
 
   /**
     * Used when we don't have an auth provider - any visibilities in the feature will

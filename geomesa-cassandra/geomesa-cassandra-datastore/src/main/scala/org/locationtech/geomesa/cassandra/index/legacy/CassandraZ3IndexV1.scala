@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,14 +8,13 @@
 
 package org.locationtech.geomesa.cassandra.index.legacy
 
-import org.locationtech.geomesa.cassandra.data._
-import org.locationtech.geomesa.cassandra.index.CassandraIndexAdapter.ScanConfig
-import org.locationtech.geomesa.cassandra.index.{CassandraFeatureIndex, CassandraIndexAdapter, CassandraZ3Layout}
-import org.locationtech.geomesa.cassandra.{RowRange, RowValue}
-import org.locationtech.geomesa.index.index.legacy.Z3LegacyIndex
+import org.locationtech.geomesa.cassandra.index.CassandraZ3Index
+import org.locationtech.geomesa.index.index.legacy.Z3LegacyIndexKeySpace
+import org.locationtech.geomesa.index.index.z3.Z3IndexKeySpace
 
-case object CassandraZ3IndexV1
-    extends Z3LegacyIndex[CassandraDataStore, CassandraFeature, Seq[RowValue], Seq[RowRange], ScanConfig]
-    with CassandraFeatureIndex with CassandraZ3Layout with CassandraIndexAdapter {
+case object CassandraZ3IndexV1 extends CassandraZ3Index {
+
   override val version: Int = 1
+
+  override protected val keySpace: Z3IndexKeySpace = Z3LegacyIndexKeySpace
 }

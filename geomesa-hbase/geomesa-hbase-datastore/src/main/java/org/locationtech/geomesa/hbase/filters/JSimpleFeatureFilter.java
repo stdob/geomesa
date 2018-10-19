@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -28,9 +28,13 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 
+// Replaced with CqlTransformFilter
+@Deprecated
 public class JSimpleFeatureFilter extends FilterBase {
 
     public static int Priority = 30;
+
+    private static Logger logger = LoggerFactory.getLogger(JSimpleFeatureFilter.class);
 
     private final Filter localFilter;
     private final KryoBufferSimpleFeature reusable;
@@ -139,7 +143,10 @@ public class JSimpleFeatureFilter extends FilterBase {
         }
     }
 
-    public JSimpleFeatureFilter(String sftString, String filterString, String transformString, String transformSchemaString) throws CQLException {
+    private JSimpleFeatureFilter(String sftString,
+                                 String filterString,
+                                 String transformString,
+                                 String transformSchemaString) throws CQLException {
         this.sftString = sftString;
         this.sft = IteratorCache.sft(sftString);
         this.reusable = IteratorCache.serializer(sftString, SerializationOptions.withoutId()).getReusableFeature();
@@ -202,12 +209,17 @@ public class JSimpleFeatureFilter extends FilterBase {
         return Bytes.add(arrays);
     }
 
+    @Override
+    public String toString() {
+        return "JSimpleFeatureFilter[filter=" + filterString + ",transform=" + transform + "]";
+    }
+
     public static byte[] toByteArray(String sftString, String filterString, String transform, String transformSchema) throws IOException {
         byte[][] arrays = {getLengthArray(sftString), getLengthArray(filterString), getLengthArray(transform), getLengthArray(transformSchema)};
         return Bytes.add(arrays);
     }
 
-    public static byte[] getLengthArray(String s) {
+    private static byte[] getLengthArray(String s) {
         int len = getLen(s);
         if (len == 0) {
             return Bytes.toBytes(0);
@@ -216,7 +228,7 @@ public class JSimpleFeatureFilter extends FilterBase {
         }
     }
 
-    public static int getLen(String s) {
+    private static int getLen(String s) {
         if (s != null) {
             return s.length();
         } else {
@@ -225,6 +237,7 @@ public class JSimpleFeatureFilter extends FilterBase {
     }
 
     public static org.apache.hadoop.hbase.filter.Filter parseFrom(final byte [] pbBytes) throws DeserializationException {
+        logger.trace("Parsing filter of length: " + pbBytes.length);
         int sftLen =  Bytes.readAsInt(pbBytes, 0, 4);
         String sftString = new String(pbBytes, 4, sftLen);
 

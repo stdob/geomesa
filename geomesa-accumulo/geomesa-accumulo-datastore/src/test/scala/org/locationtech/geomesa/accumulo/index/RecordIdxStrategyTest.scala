@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -49,7 +49,7 @@ class RecordIdxStrategyTest extends Specification with TestWithDataStore {
     IntersectionResult(computedIntersectionIds, trueIntersectionIds)
   }
 
-  override val spec = "name:String,track:String,dtg:Date,*geom:Point:srid=4326;geomesa.indexes.enabled='records'"
+  override val spec = "name:String,track:String,dtg:Date,*geom:Point:srid=4326;geomesa.indexes.enabled='id'"
 
   val features = (0 until 20).map { i =>
     val name = s"name$i"

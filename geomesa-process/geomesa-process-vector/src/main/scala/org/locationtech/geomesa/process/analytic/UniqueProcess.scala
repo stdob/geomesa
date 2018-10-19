@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -12,12 +12,12 @@ import com.typesafe.scalalogging.LazyLogging
 import org.geotools.data.Query
 import org.geotools.data.collection.ListFeatureCollection
 import org.geotools.data.simple.{SimpleFeatureCollection, SimpleFeatureSource}
-import org.geotools.factory.CommonFactoryFinder
 import org.geotools.feature.simple.{SimpleFeatureBuilder, SimpleFeatureTypeBuilder}
 import org.geotools.feature.visitor.{AbstractCalcResult, CalcResult}
 import org.geotools.process.factory.{DescribeParameter, DescribeProcess, DescribeResult}
+import org.locationtech.geomesa.filter.factory.FastFilterFactory
 import org.locationtech.geomesa.index.conf.QueryHints
-import org.locationtech.geomesa.index.utils.KryoLazyStatsUtils
+import org.locationtech.geomesa.index.iterators.StatsScan
 import org.locationtech.geomesa.process.{GeoMesaProcess, GeoMesaProcessVisitor}
 import org.locationtech.geomesa.utils.collection.SelfClosingIterator
 import org.locationtech.geomesa.utils.geotools.RichAttributeDescriptors.RichAttributeDescriptor
@@ -167,6 +167,9 @@ class AttributeVisitor(val features: SimpleFeatureCollection,
 
   private var attributeIdx: Int = -1
 
+  // normally handled in our query planner, but we are going to use the filter directly here
+  private lazy val manualFilter = filter.map(FastFilterFactory.optimize(features.getSchema, _))
+
   private def getAttribute[T](f: SimpleFeature) = {
     if (attributeIdx == -1) {
       attributeIdx = f.getType.indexOf(attribute)
@@ -194,7 +197,7 @@ class AttributeVisitor(val features: SimpleFeatureCollection,
   // non-optimized visit
   override def visit(feature: Feature): Unit = {
     val f = feature.asInstanceOf[SimpleFeature]
-    if (filter.forall(_.evaluate(f))) {
+    if (manualFilter.forall(_.evaluate(f))) {
       addValue(f)
     }
   }
@@ -226,7 +229,7 @@ class AttributeVisitor(val features: SimpleFeatureCollection,
       val enumeration = try {
         // stats should always return exactly one result, even if there are no features in the table
         val encoded = reader.next.getAttribute(0).asInstanceOf[String]
-        KryoLazyStatsUtils.decodeStat(sft)(encoded).asInstanceOf[EnumerationStat[Any]]
+        StatsScan.decodeStat(sft)(encoded).asInstanceOf[EnumerationStat[Any]]
       } finally {
         reader.close()
       }
@@ -255,7 +258,7 @@ class AttributeVisitor(val features: SimpleFeatureCollection,
 
 object AttributeVisitor {
 
-  lazy val ff  = CommonFactoryFinder.getFilterFactory2
+  import org.locationtech.geomesa.filter.ff
 
   /**
    * Returns a filter that is equivalent to Filter.INCLUDE, but against the attribute index.

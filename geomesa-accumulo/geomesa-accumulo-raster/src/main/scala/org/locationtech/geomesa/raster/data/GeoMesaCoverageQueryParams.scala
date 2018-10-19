@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -37,7 +37,7 @@ class GeoMesaCoverageQueryParams(parameters: Array[GeneralParameterValue]) {
   val max = Array(correctedMaxLongitude, correctedMaxLatitude)
   val bbox = BoundingBox(Bounds(min(0), max(0)), Bounds(min(1), max(1)))
 
-  def toRasterQuery: RasterQuery = RasterQuery(bbox, suggestedQueryResolution, None, None)
+  def toRasterQuery: RasterQuery = RasterQuery(bbox, suggestedQueryResolution)
 
   def correctedMaxLongitude: Double = Math.max(Math.min(envelope.getMaximum(0), 180), -180.0)
 

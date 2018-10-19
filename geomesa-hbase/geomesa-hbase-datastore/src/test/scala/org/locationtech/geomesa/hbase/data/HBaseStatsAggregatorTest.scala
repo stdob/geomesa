@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -14,11 +14,9 @@ import org.geotools.data.simple.SimpleFeatureStore
 import org.geotools.data.{DataStoreFinder, Query}
 import org.geotools.factory.Hints
 import org.geotools.filter.text.ecql.ECQL
-import org.joda.time.{DateTime, DateTimeZone}
 import org.locationtech.geomesa.features.ScalaSimpleFeature
 import org.locationtech.geomesa.hbase.data.HBaseDataStoreParams._
 import org.locationtech.geomesa.index.conf.QueryHints
-import org.locationtech.geomesa.index.utils.KryoLazyStatsUtils.decodeStat
 import org.locationtech.geomesa.utils.collection.SelfClosingIterator
 import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes
 import org.locationtech.geomesa.utils.stats._
@@ -28,6 +26,8 @@ import scala.collection.JavaConversions._
 
 class HBaseStatsAggregatorTest extends HBaseTest with LazyLogging {
 
+  import org.locationtech.geomesa.index.iterators.StatsScan.decodeStat
+
   sequential
 
   val TEST_FAMILY = "idt:java.lang.Integer:index=full,attr:java.lang.Long:index=join,dtg:Date,*geom:Point:srid=4326"
@@ -36,10 +36,7 @@ class HBaseStatsAggregatorTest extends HBaseTest with LazyLogging {
   val typeName = "HBaseStatsAggregatorTest"
 
   lazy val features = (0 until 150).map { i =>
-    val attrs = Array(i.asInstanceOf[AnyRef], (i * 2).asInstanceOf[AnyRef],
-      new DateTime("2012-01-01T19:00:00", DateTimeZone.UTC).toDate, "POINT(-77 38)")
-    val sf = new ScalaSimpleFeature(sft, i.toString)
-    sf.setAttributes(attrs)
+    val sf = ScalaSimpleFeature.create(sft, i.toString, i, i * 2, "2012-01-01T19:00:00Z", "POINT(-77 38)")
     sf.getUserData.put(Hints.USE_PROVIDED_FID, java.lang.Boolean.TRUE)
     sf
   }

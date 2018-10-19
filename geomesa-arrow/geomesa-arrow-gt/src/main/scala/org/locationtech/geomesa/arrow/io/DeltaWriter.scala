@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -15,13 +15,14 @@ import java.util.concurrent.ThreadLocalRandom
 import com.google.common.collect.HashBiMap
 import com.google.common.primitives.{Ints, Longs}
 import com.typesafe.scalalogging.StrictLogging
+import com.vividsolutions.jts.geom.Geometry
 import org.apache.arrow.memory.BufferAllocator
-import org.apache.arrow.vector.complex.NullableMapVector
+import org.apache.arrow.vector.complex.StructVector
 import org.apache.arrow.vector.dictionary.DictionaryProvider.MapDictionaryProvider
-import org.apache.arrow.vector.stream.ArrowStreamWriter
+import org.apache.arrow.vector.ipc.ArrowStreamWriter
 import org.apache.arrow.vector.types.pojo.{ArrowType, DictionaryEncoding}
 import org.apache.arrow.vector.util.TransferPair
-import org.apache.arrow.vector.{FieldVector, NullableIntVector}
+import org.apache.arrow.vector.{FieldVector, IntVector}
 import org.locationtech.geomesa.arrow.io.records.{RecordBatchLoader, RecordBatchUnloader}
 import org.locationtech.geomesa.arrow.vector.SimpleFeatureVector.SimpleFeatureEncoding
 import org.locationtech.geomesa.arrow.vector._
@@ -61,25 +62,24 @@ class DeltaWriter(val sft: SimpleFeatureType,
 
   private val result = new ByteArrayOutputStream
 
-  private val vector = NullableMapVector.empty(sft.getTypeName, allocator)
+  private val vector = StructVector.empty(sft.getTypeName, allocator)
 
   private val ordering = sort.map { case (field, reverse) =>
     val o = SimpleFeatureOrdering(sft.indexOf(field))
     if (reverse) { o.reverse } else { o }
   }
 
-  private val idWriter = ArrowAttributeWriter.id(Some(vector), encoding)
+  private val idWriter = ArrowAttributeWriter.id(sft, Some(vector), encoding)
   private val writers = sft.getAttributeDescriptors.map { descriptor =>
     val name = descriptor.getLocalName
     val isDictionary = dictionaryFields.contains(name)
     val classBinding = if (isDictionary) { classOf[Integer] } else { descriptor.getType.getBinding }
-    val (objectType, bindings) = ObjectType.selectType(classBinding, descriptor.getUserData)
-    val attribute = ArrowAttributeWriter(name, bindings.+:(objectType), classBinding, Some(vector), None, Map.empty, encoding)
+    val bindings = ObjectType.selectType(classBinding, descriptor.getUserData)
+    val attribute = ArrowAttributeWriter(name, bindings, Some(vector), None, Map.empty, encoding)
 
     val dictionary = if (!isDictionary) { None } else {
-      val classBinding = descriptor.getType.getBinding
-      val (objectType, bindings) = ObjectType.selectType(classBinding, descriptor.getUserData)
-      val attribute = ArrowAttributeWriter(name, bindings.+:(objectType), classBinding, None, None, Map.empty, encoding)
+      val bindings = ObjectType.selectType(descriptor)
+      val attribute = ArrowAttributeWriter(name, bindings, None, None, Map.empty, encoding)
       val writer = new BatchWriter(attribute.vector)
       attribute.vector.setInitialCapacity(initialCapacity)
       attribute.vector.allocateNew()
@@ -161,10 +161,10 @@ class DeltaWriter(val sft: SimpleFeatureType,
     }
 
     // set feature ids in the vector
-    if (encoding.fids) {
+    if (encoding.fids.isDefined) {
       var i = 0
       while (i < count) {
-        idWriter.apply(i, features(i).getID)
+        idWriter.apply(i, features(i))
         i += 1
       }
       idWriter.setValueCount(count)
@@ -238,7 +238,7 @@ object DeltaWriter extends StrictLogging {
 
     val threaded = try { deltas.toArray.groupBy(Longs.fromByteArray).values.toArray } finally { deltas.close() }
 
-    logger.trace(s"merging ${threaded.length} threaded delta batches")
+    logger.trace(s"merging delta batches from ${threaded.length} thread(s)")
 
     val dictionaries = mergeDictionaries(sft, dictionaryFields, threaded, encoding)
 
@@ -279,43 +279,52 @@ object DeltaWriter extends StrictLogging {
       private val loader = RecordBatchLoader(result.underlying.getField)
       private val unloader = new RecordBatchUnloader(result)
 
-      private val transfers: Seq[(String, (Int, Int, collection.Map[Integer, Integer]) => Unit)] =
-        loader.vector.getChildrenFromFields.map { child =>
-          val name = child.getField.getName
-          val to = result.underlying.getChild(name)
-          val transfer = if (child.getField.getDictionary == null) {
-            val pair = child.makeTransferPair(to)
-            (fromIndex: Int, toIndex: Int, _: collection.Map[Integer, Integer]) => {
-              pair.copyValueSafe(fromIndex, toIndex)
-            }
-          } else {
-            val accessor = child.getAccessor.asInstanceOf[NullableIntVector#Accessor]
-            val m = to.getMutator.asInstanceOf[NullableIntVector#Mutator]
-            (fromIndex: Int, toIndex: Int, mapping: collection.Map[Integer, Integer]) => {
-              val n = accessor.getObject(fromIndex)
-              if (n == null) {
-                m.setNull(toIndex)
-              } else {
-                m.setSafe(toIndex, mapping(n))
+      private val transfers: Seq[(String, (Int, Int, scala.collection.Map[Integer, Integer]) => Unit)] = {
+        loader.vector.getChildrenFromFields.map { fromVector =>
+          val name = fromVector.getField.getName
+          val toVector = result.underlying.getChild(name)
+          val transfer: (Int, Int, scala.collection.Map[Integer, Integer]) => Unit =
+            if (fromVector.getField.getDictionary != null) {
+              val from = fromVector.asInstanceOf[IntVector]
+              val to = toVector.asInstanceOf[IntVector]
+              (fromIndex: Int, toIndex: Int, mapping: scala.collection.Map[Integer, Integer]) => {
+                val n = from.getObject(fromIndex)
+                if (n == null) {
+                  to.setNull(toIndex)
+                } else {
+                  to.setSafe(toIndex, mapping(n))
+                }
+              }
+            } else if (SimpleFeatureVector.isGeometryVector(fromVector)) {
+              // geometry vectors use FixedSizeList vectors, for which transfer pairs aren't implemented
+              val from = GeometryFields.wrap(fromVector).asInstanceOf[GeometryVector[Geometry, FieldVector]]
+              val to = GeometryFields.wrap(toVector).asInstanceOf[GeometryVector[Geometry, FieldVector]]
+              (fromIndex: Int, toIndex: Int, _: scala.collection.Map[Integer, Integer]) => {
+                from.transfer(fromIndex, toIndex, to)
+              }
+            } else {
+              val pair = fromVector.makeTransferPair(toVector)
+              (fromIndex: Int, toIndex: Int, _: scala.collection.Map[Integer, Integer]) => {
+                pair.copyValueSafe(fromIndex, toIndex)
               }
             }
-          }
           (name, transfer)
         }
+      }
 
       private val threadIterator = threadedBatches.iterator
       private var threadIndex = -1
       private var batches: Iterator[Array[Byte]] = Iterator.empty
-      private var mappings: Map[String, collection.Map[Integer, Integer]] = _
+      private var mappings: Map[String, scala.collection.Map[Integer, Integer]] = _
       private var count = 0 // records read in current batch
 
-      override def hasNext: Boolean = count < loader.vector.getAccessor.getValueCount || loadNextBatch()
+      override def hasNext: Boolean = count < loader.vector.getValueCount || loadNextBatch()
 
       override def next(): Array[Byte] = {
         var total = 0
         while (total < batchSize && hasNext) {
           // read the rest of the current vector, up to the batch size
-          val toRead = math.min(batchSize - total, loader.vector.getAccessor.getValueCount - count)
+          val toRead = math.min(batchSize - total, loader.vector.getValueCount - count)
           transfers.foreach { case (name, transfer) =>
             val mapping = mappings.get(name).orNull
             logger.trace(s"dictionary mappings for $name: $mapping")
@@ -355,7 +364,7 @@ object DeltaWriter extends StrictLogging {
           offset += 4 // skip over message length bytes
           // load the record batch
           loader.load(batch, offset, messageLength)
-          if (loader.vector.getAccessor.getValueCount > 0) {
+          if (loader.vector.getValueCount > 0) {
             count = 0 // reset count for this batch
             true
           } else {
@@ -421,13 +430,14 @@ object DeltaWriter extends StrictLogging {
     logger.trace(s"merging sorted deltas - read schema: ${result.underlying.getField}")
 
     // builder for our merge array - (vector, reader for sort values, transfers to result, dictionary mappings)
-    val mergeBuilder = Array.newBuilder[(NullableMapVector, ArrowAttributeReader, Seq[(Int, Int) => Unit], scala.collection.Map[Integer, Integer])]
+    val mergeBuilder = Array.newBuilder[(StructVector, ArrowAttributeReader, Seq[(Int, Int) => Unit], scala.collection.Map[Integer, Integer])]
     mergeBuilder.sizeHint(threadedBatches.foldLeft(0)((sum, a) => sum + a.length))
 
     threadedBatches.foreachIndex { case (batches, batchIndex) =>
       val mappings = dictionaryMappings.map { case (f, m) => (f, m(batchIndex)) }
-      logger.trace(s"loading ${batches.length} threaded batches")
-      batches.foreachIndex { case (batch, j) =>
+      logger.trace(s"loading ${batches.length} batch(es) from a single thread")
+
+      batches.foreach { batch =>
         // note: for some reason we have to allow the batch loader to create the vectors or this doesn't work
         val loader = RecordBatchLoader(result.underlying.getField)
         // skip the dictionary batches
@@ -439,26 +449,32 @@ object DeltaWriter extends StrictLogging {
         offset += 4 // skip the length bytes
         // load the record batch
         loader.load(batch, offset, messageLength)
-        val transfers: Seq[(Int, Int) => Unit] = loader.vector.getChildrenFromFields.map { child =>
-          val to = result.underlying.getChild(child.getField.getName)
-          if (child.getField.getDictionary == null) {
-            val transfer = child.makeTransferPair(to)
-            (fromIndex: Int, toIndex: Int) => transfer.copyValueSafe(fromIndex, toIndex)
-          } else {
-            val mapping = mappings(child.getField.getName)
-            val accessor = child.getAccessor
-            val m = to.getMutator.asInstanceOf[NullableIntVector#Mutator]
+        val transfers: Seq[(Int, Int) => Unit] = loader.vector.getChildrenFromFields.map { fromVector =>
+          val toVector = result.underlying.getChild(fromVector.getField.getName)
+          if (fromVector.getField.getDictionary != null) {
+            val mapping = mappings(fromVector.getField.getName)
+            val to = toVector.asInstanceOf[IntVector]
             (fromIndex: Int, toIndex: Int) => {
-              val n = accessor.getObject(fromIndex).asInstanceOf[Integer]
+              val n = fromVector.getObject(fromIndex).asInstanceOf[Integer]
               if (n == null) {
-                m.setNull(toIndex)
+                to.setNull(toIndex)
               } else {
-                m.setSafe(toIndex, mapping(n))
+                to.setSafe(toIndex, mapping(n))
               }
             }
+          } else if (SimpleFeatureVector.isGeometryVector(fromVector)) {
+            // geometry vectors use FixedSizeList vectors, for which transfer pairs aren't implemented
+            val from = GeometryFields.wrap(fromVector).asInstanceOf[GeometryVector[Geometry, FieldVector]]
+            val to = GeometryFields.wrap(toVector).asInstanceOf[GeometryVector[Geometry, FieldVector]]
+            (fromIndex: Int, toIndex: Int) => {
+              from.transfer(fromIndex, toIndex, to)
+            }
+          } else {
+            val transfer = fromVector.makeTransferPair(toVector)
+            (fromIndex: Int, toIndex: Int) => transfer.copyValueSafe(fromIndex, toIndex)
           }
         }
-        val mapVector = loader.vector.asInstanceOf[NullableMapVector]
+        val mapVector = loader.vector.asInstanceOf[StructVector]
         val sortReader = ArrowAttributeReader(sft.getDescriptor(sortBy), mapVector.getChild(sortBy), dictionaries.get(sortBy), encoding)
         mergeBuilder += ((mapVector, sortReader, transfers, mappings.get(sortBy).orNull))
       }
@@ -474,7 +490,7 @@ object DeltaWriter extends StrictLogging {
     }
 
     toMerge.foreachIndex { case ((vector, sort, _, mappings), i) =>
-      if (vector.getAccessor.getValueCount > 0) {
+      if (vector.getValueCount > 0) {
         queue += ((getSortAttribute(sort, mappings, 0), i, 0))
       }
     }
@@ -489,10 +505,10 @@ object DeltaWriter extends StrictLogging {
           val (_, batch, i) = queue.dequeue()
           val (vector, sort, transfers, mappings) = toMerge(batch)
           transfers.foreach(_.apply(i, resultIndex))
-          result.underlying.getMutator.setIndexDefined(resultIndex)
+          result.underlying.setIndexDefined(resultIndex)
           resultIndex += 1
           val nextBatchIndex = i + 1
-          if (vector.getAccessor.getValueCount > nextBatchIndex) {
+          if (vector.getValueCount > nextBatchIndex) {
             val value = getSortAttribute(sort, mappings, nextBatchIndex)
             queue += ((value, batch, nextBatchIndex))
           }
@@ -633,7 +649,7 @@ object DeltaWriter extends StrictLogging {
           }
           count += 1
         }
-        dictionaries(i).vector.getMutator.setValueCount(count)
+        dictionaries(i).vector.setValueCount(count)
         transfers(i) = dictionaries(i).vector.makeTransferPair(results(i).vector)
         i += 1
       }
@@ -678,7 +694,7 @@ object DeltaWriter extends StrictLogging {
           CloseWithLogging(vectors(i).vector)
         }
       }
-      result.vector.getMutator.setValueCount(count)
+      result.vector.setValueCount(count)
     }
 
     // convert from indexed arrays to dictionary-field-keyed maps
@@ -735,7 +751,7 @@ object DeltaWriter extends StrictLogging {
         logger.trace("writing 0 bytes")
         to.write(Ints.toByteArray(0))
       } else {
-        vector.getMutator.setValueCount(count)
+        vector.setValueCount(count)
         root.setRowCount(count)
         writer.writeBatch()
         logger.trace(s"writing ${os.size} bytes")

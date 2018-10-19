@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -10,20 +10,19 @@ package org.locationtech.geomesa.tools.ingest
 
 import java.io._
 import java.util.concurrent._
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 
 import com.beust.jcommander.ParameterException
 import com.typesafe.scalalogging.LazyLogging
-import org.apache.commons.io.IOUtils
 import org.geotools.data._
 import org.geotools.factory.Hints
 import org.geotools.filter.identity.FeatureIdImpl
-import org.joda.time.format.{PeriodFormatter, PeriodFormatterBuilder}
 import org.locationtech.geomesa.tools.Command
 import org.locationtech.geomesa.tools.DistributedRunParam.RunModes
 import org.locationtech.geomesa.tools.DistributedRunParam.RunModes.RunMode
-import org.locationtech.geomesa.utils.io.PathUtils
 import org.locationtech.geomesa.utils.io.fs.FileSystemDelegate.FileHandle
+import org.locationtech.geomesa.utils.io.fs.LocalDelegate.StdInHandle
+import org.locationtech.geomesa.utils.io.{CloseWithLogging, PathUtils}
 import org.locationtech.geomesa.utils.stats.CountingInputStream
 import org.locationtech.geomesa.utils.text.TextTools
 import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
@@ -43,8 +42,8 @@ import scala.util.control.NonFatal
   * @param numLocalThreads for local ingest, how many threads to use
   */
 abstract class AbstractIngest(val dsParams: Map[String, String],
-                              typeName: String,
-                              inputs: Seq[String],
+                              val typeName: String,
+                              val inputs: Seq[String],
                               mode: Option[RunMode],
                               libjarsFile: String,
                               libjarsPaths: Iterator[() => Seq[File]],
@@ -80,53 +79,44 @@ abstract class AbstractIngest(val dsParams: Map[String, String],
    * Main method to kick off ingestion
    */
   override def run(): Unit = {
-    def local(): Unit = {
-      beforeRunTasks()
-      Command.user.info("Running ingestion in local mode")
-      runLocal()
-    }
-
-    def distributed(): Unit = {
-      beforeRunTasks()
-      Command.user.info("Running ingestion in distributed mode")
-      runDistributed()
-    }
-
-    if (PathUtils.isRemote(inputs.head)) {
+    if (inputs.isEmpty && !StdInHandle.isAvailable) {
+      throw new ParameterException("Missing option: <files>... is required")
+    } else if (inputs.headOption.exists(PathUtils.isRemote)) {
       if (mode.contains(RunModes.Local)) {
-        local()
+        runLocal()
       } else {
-        distributed()
+        runDistributed()
       }
     } else if (mode.forall(_ == RunModes.Local)) {
-      local()
+      runLocal()
     } else {
       throw new ParameterException("To run in distributed mode, please copy input files to a distributed file system")
     }
     ds.dispose()
   }
 
-  private def runLocal(): Unit = {
+  protected def runLocal(): Unit = {
+    beforeRunTasks()
+    Command.user.info("Running ingestion in local mode")
 
     // Global failure shared between threads
-    val (written, failed) = (new AtomicLong(0), new AtomicLong(0))
+    val written = new AtomicLong(0)
+    val failed = new AtomicLong(0)
+    val errors = new AtomicInteger(0)
 
     val bytesRead = new AtomicLong(0L)
 
     class LocalIngestWorker(file: FileHandle) extends Runnable {
       override def run(): Unit = {
         try {
-          // only create the feature writer after the converter runs
-          // so that we can create the schema based off the input file
           var fw: FeatureWriter[SimpleFeatureType, SimpleFeature] = null
           val converter = createLocalConverter(file.path, failed)
           // count the raw bytes read from the file, as that's what we based our total on
           val countingStream = new CountingInputStream(file.open)
           val is = PathUtils.handleCompression(countingStream, file.path)
           try {
-            val (sft, features) = converter.convert(is)
+            val features = converter.convert(is)
             if (features.hasNext) {
-              ds.createSchema(sft)
               fw = ds.getFeatureWriterAppend(typeName, Transaction.AUTO_COMMIT)
             }
             features.foreach { sf =>
@@ -147,9 +137,11 @@ abstract class AbstractIngest(val dsParams: Map[String, String],
               countingStream.resetCount()
             }
           } finally {
-            IOUtils.closeQuietly(converter)
-            IOUtils.closeQuietly(is)
-            IOUtils.closeQuietly(fw)
+            CloseWithLogging(converter)
+            CloseWithLogging(is)
+            if (fw != null) {
+              fw.close() // allow exception to propagate
+            }
           }
         } catch {
           case e @ (_: ClassNotFoundException | _: NoClassDefFoundError) =>
@@ -159,26 +151,36 @@ abstract class AbstractIngest(val dsParams: Map[String, String],
             throw e
 
           case NonFatal(e) =>
-            // Don't kill the entire program bc this thread was bad! use outer try/catch
-            val msg = s"Fatal error running local ingest worker on file ${file.path}"
+            // Don't kill the entire program b/c this thread was bad! use outer try/catch
+            val msg = s"Fatal error running local ingest worker on ${file.path}"
             Command.user.error(msg)
             logger.error(msg, e)
+            errors.incrementAndGet()
         }
       }
     }
 
-    val files = inputs.flatMap(PathUtils.interpretPath)
-    val numFiles = files.length
-    val totalLength = files.map(_.length).sum.toFloat
+    // if inputs is empty, we've already validated that stdin has data to read
+    val stdin = inputs.isEmpty
 
-    def progress(): Float = bytesRead.get() / totalLength
+    val files = if (stdin) { StdInHandle.available().toSeq } else { inputs.flatMap(PathUtils.interpretPath) }
 
-    val threads = if (numLocalThreads <= numFiles) { numLocalThreads } else {
+    val threads = if (numLocalThreads <= files.length) { numLocalThreads } else {
       Command.user.warn("Can't use more threads than there are input files - reducing thread count")
-      numFiles
+      files.length
     }
 
-    Command.user.info(s"Ingesting ${TextTools.getPlural(numFiles, "file")} with ${TextTools.getPlural(threads, "thread")}")
+    Command.user.info(s"Ingesting ${if (stdin) { "from stdin" } else { TextTools.getPlural(files.length, "file") }} " +
+        s"with ${TextTools.getPlural(threads, "thread")}")
+
+    val totalLength: () => Float = if (stdin) {
+      () => (bytesRead.get + files.map(_.length).sum).toFloat // re-evaluate each time as bytes are read from stdin
+    } else {
+      val length = files.map(_.length).sum.toFloat // only evaluate once
+      () => length
+    }
+
+    def progress(): Float = bytesRead.get() / totalLength()
 
     val start = System.currentTimeMillis()
     val statusCallback = createCallback()
@@ -199,10 +201,19 @@ abstract class AbstractIngest(val dsParams: Map[String, String],
     futures.foreach(_.get)
 
     Command.user.info(s"Local ingestion complete in ${TextTools.getTime(start)}")
-    Command.user.info(getStatInfo(written.get, failed.get))
+    if (files.lengthCompare(1) == 0) {
+      Command.user.info(getStatInfo(written.get, failed.get, input = s" for file: ${files.head.path}."))
+    } else {
+      Command.user.info(getStatInfo(written.get, failed.get))
+    }
+    if (errors.get > 0) {
+      Command.user.warn("Some files caused errors, ingest counts may not be accurate")
+    }
   }
 
-  private def runDistributed(): Unit = {
+  protected def runDistributed(): Unit = {
+    beforeRunTasks()
+    Command.user.info("Running ingestion in distributed mode")
     val start = System.currentTimeMillis()
     val statusCallback = createCallback()
     val (success, failed) = runDistributedJob(statusCallback)
@@ -221,10 +232,6 @@ abstract class AbstractIngest(val dsParams: Map[String, String],
 
 object AbstractIngest {
 
-  val PeriodFormatter: PeriodFormatter =
-    new PeriodFormatterBuilder().minimumPrintedDigits(2).printZeroAlways()
-      .appendHours().appendSeparator(":").appendMinutes().appendSeparator(":").appendSeconds().toFormatter
-
   lazy private val terminalWidth: () => Float = {
     val jline = for {
       terminalClass <- Try(Class.forName("jline.Terminal"))
@@ -239,13 +246,13 @@ object AbstractIngest {
   /**
    * Gets status as a string
    */
-  def getStatInfo(successes: Long, failures: Long): String = {
+  def getStatInfo(successes: Long, failures: Long, action: String = "Ingested", input: String = ""): String = {
     val failureString = if (failures == 0) {
       "with no failures"
     } else {
       s"and failed to ingest ${TextTools.getPlural(failures, "feature")}"
     }
-    s"Ingested ${TextTools.getPlural(successes, "feature")} $failureString."
+    s"$action ${TextTools.getPlural(successes, "feature")} $failureString$input."
   }
 
   sealed trait StatusCallback {
@@ -306,8 +313,8 @@ object AbstractIngest {
       }
     }
   }
-}
 
-trait LocalIngestConverter extends Closeable {
-  def convert(is: InputStream): (SimpleFeatureType, Iterator[SimpleFeature])
+  trait LocalIngestConverter extends Closeable {
+    def convert(is: InputStream): Iterator[SimpleFeature]
+  }
 }

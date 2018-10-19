@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -22,7 +22,6 @@ class AccumuloRasterStoreQueryIntegratedTest extends Specification {
   sequential
 
   var testIteration = 0
-  implicit val noTime: Timings = NoOpTimings
 
   def getNewIteration() = {
     testIteration += 1

@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -268,16 +268,18 @@ class BackCompatibilityTest extends Specification with LazyLogging {
   }
 
   "GeoMesa" should {
-    "support backward compatibility to 1.2.0"   >> { testVersion("1.2.0") }
-    "support backward compatibility to 1.2.1"   >> { testVersion("1.2.1") }
-    "support backward compatibility to 1.2.2"   >> { testVersion("1.2.2") }
-    "support backward compatibility to 1.2.3"   >> { testVersion("1.2.3") }
-    "support backward compatibility to 1.2.4"   >> { testVersion("1.2.4") }
+    "support backward compatibility to 1.2.0"     >> { testVersion("1.2.0") }
+    "support backward compatibility to 1.2.1"     >> { testVersion("1.2.1") }
+    "support backward compatibility to 1.2.2"     >> { testVersion("1.2.2") }
+    "support backward compatibility to 1.2.3"     >> { testVersion("1.2.3") }
+    "support backward compatibility to 1.2.4"     >> { testVersion("1.2.4") }
     // note: data on disk is the same in 1.2.5 and 1.2.6
-    "support backward compatibility to 1.2.6"   >> { testVersion("1.2.6") }
-    "support backward compatibility to 1.2.7.3" >> { testVersion("1.2.7.3") }
-    "support backward compatibility to 1.3.1"   >> { testVersion("1.3.1") }
-    "support backward compatibility to 1.3.2"   >> { testVersion("1.3.2") }
+    "support backward compatibility to 1.2.6"     >> { testVersion("1.2.6") }
+    "support backward compatibility to 1.2.7.3"   >> { testVersion("1.2.7.3") }
+    "support backward compatibility to 1.3.1"     >> { testVersion("1.3.1") }
+    "support backward compatibility to 1.3.2"     >> { testVersion("1.3.2") }
+    // note: data on disk is the same from 1.3.3 through 2.0.0-m.1
+    "support backward compatibility to 2.0.0-m.1" >> { testVersion("2.0.0-m.1") }
 
     "delete invalid indexed data" >> { testBoundsDelete() }
   }

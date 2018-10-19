@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -12,10 +12,10 @@ import java.util.Date
 
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.DirtyRootAllocator
-import org.apache.arrow.vector.complex.NullableMapVector
+import org.apache.arrow.vector.complex.StructVector
 import org.junit.runner.RunWith
 import org.locationtech.geomesa.arrow.io.records.{RecordBatchLoader, RecordBatchUnloader}
-import org.locationtech.geomesa.arrow.vector.SimpleFeatureVector.{EncodingPrecision, SimpleFeatureEncoding}
+import org.locationtech.geomesa.arrow.vector.SimpleFeatureVector.SimpleFeatureEncoding
 import org.locationtech.geomesa.arrow.vector.{ArrowDictionary, SimpleFeatureVector}
 import org.locationtech.geomesa.features.ScalaSimpleFeature
 import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes
@@ -42,7 +42,7 @@ class SimpleFeatureArrowIOTest extends Specification {
 
   "SimpleFeatureArrowIO" should {
     "merge sort arrow batches" >> {
-      val encoding = SimpleFeatureEncoding(fids = true, EncodingPrecision.Min, EncodingPrecision.Min)
+      val encoding = SimpleFeatureEncoding.min(includeFids = true)
       val dictionaries = Map.empty[String, ArrowDictionary]
       val (field, batches) = WithClose(SimpleFeatureVector.create(sft, dictionaries, encoding)) { vector =>
         val unloader = new RecordBatchUnloader(vector)
@@ -59,7 +59,7 @@ class SimpleFeatureArrowIOTest extends Specification {
 
       val features = WithClose(SimpleFeatureArrowIO.sortBatches(sft, dictionaries, encoding, "dtg", reverse = false, 10, batches.iterator)) { sorted =>
         val loader = RecordBatchLoader(field)
-        WithClose(SimpleFeatureVector.wrap(loader.vector.asInstanceOf[NullableMapVector], dictionaries)) { vector =>
+        WithClose(SimpleFeatureVector.wrap(loader.vector.asInstanceOf[StructVector], dictionaries)) { vector =>
           sorted.flatMap { batch =>
             vector.clear()
             loader.load(batch)

@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -11,11 +11,13 @@ package org.locationtech.geomesa.utils.geotools
 import java.util.regex.Pattern
 
 import com.typesafe.config.ConfigFactory
+import org.geotools.feature.simple.SimpleFeatureTypeBuilder
 import org.junit.runner.RunWith
 import org.locationtech.geomesa.utils.geotools.RichAttributeDescriptors._
 import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes.AttributeOptions._
 import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes.Configs._
 import org.locationtech.geomesa.utils.stats.{Cardinality, IndexCoverage}
+import org.locationtech.geomesa.utils.text.KVPairParser
 import org.opengis.feature.simple.SimpleFeatureType
 import org.specs2.mutable.Specification
 import org.specs2.runner.JUnitRunner
@@ -72,6 +74,19 @@ class SimpleFeatureTypesTest extends Specification {
         encoded must contain("geomesa.table.sharing='true'")
         encoded must contain("hello='goodbye'")
       }
+    }
+
+    "create an empty type" >> {
+      val sft = SimpleFeatureTypes.createType("test", "")
+      sft.getTypeName mustEqual "test"
+      sft.getAttributeDescriptors must beEmpty
+    }
+
+    "create an empty type with user data" >> {
+      val sft = SimpleFeatureTypes.createType("test", ";geomesa.table.sharing='true'")
+      sft.getTypeName mustEqual "test"
+      sft.getAttributeDescriptors must beEmpty
+      sft.getUserData.get("geomesa.table.sharing") mustEqual "true"
     }
 
     "handle namespaces" >> {
@@ -210,15 +225,16 @@ class SimpleFeatureTypesTest extends Specification {
     }
 
     "handle splitter and splitter options" >> {
-      import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
+      import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes.Configs.{TABLE_SPLITTER, TABLE_SPLITTER_OPTS}
+
       val spec = "name:String,dtg:Date,*geom:Point:srid=4326;table.splitter.class=org.locationtech.geomesa.core.data.DigitSplitter,table.splitter.options='fmt:%02d,min:0,max:99'"
       val sft = SimpleFeatureTypes.createType("test", spec)
       sft.getUserData.get(TABLE_SPLITTER) must be equalTo "org.locationtech.geomesa.core.data.DigitSplitter"
-      val opts = sft.getTableSplitterOptions
-      opts.size must be equalTo 3
-      opts("fmt") must be equalTo "%02d"
-      opts("min") must be equalTo "0"
-      opts("max") must be equalTo "99"
+      val opts = KVPairParser.parse(sft.getUserData.get(TABLE_SPLITTER_OPTS).asInstanceOf[String])
+      opts must haveSize(3)
+      opts.get("fmt") must beSome("%02d")
+      opts.get("min") must beSome("0")
+      opts.get("max") must beSome("99")
     }
 
     "handle enabled indexes" >> {
@@ -228,18 +244,19 @@ class SimpleFeatureTypesTest extends Specification {
     }
 
     "handle splitter opts and enabled indexes" >> {
-      import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
+      import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes.Configs.{TABLE_SPLITTER, TABLE_SPLITTER_OPTS}
+
       val specs = List(
         "name:String,dtg:Date,*geom:Point:srid=4326;table.splitter.class=org.locationtech.geomesa.core.data.DigitSplitter,table.splitter.options='fmt:%02d,min:0,max:99',geomesa.indices.enabled='st_idx,records,z3'",
         "name:String,dtg:Date,*geom:Point:srid=4326;geomesa.indices.enabled='st_idx,records,z3',table.splitter.class=org.locationtech.geomesa.core.data.DigitSplitter,table.splitter.options='fmt:%02d,min:0,max:99'")
       specs.forall { spec =>
         val sft = SimpleFeatureTypes.createType("test", spec)
         sft.getUserData.get(TABLE_SPLITTER) must be equalTo "org.locationtech.geomesa.core.data.DigitSplitter"
-        val opts = sft.getTableSplitterOptions
-        opts.size must be equalTo 3
-        opts("fmt") must be equalTo "%02d"
-        opts("min") must be equalTo "0"
-        opts("max") must be equalTo "99"
+        val opts = KVPairParser.parse(sft.getUserData.get(TABLE_SPLITTER_OPTS).asInstanceOf[String])
+        opts must haveSize(3)
+        opts.get("fmt") must beSome("%02d")
+        opts.get("min") must beSome("0")
+        opts.get("max") must beSome("99")
         sft.getUserData.get(ENABLED_INDICES).toString.split(",").toList must be equalTo List("st_idx", "records", "z3")
       }
     }
@@ -259,7 +276,7 @@ class SimpleFeatureTypesTest extends Specification {
     "allow specification of ST index entry values" >> {
       val spec = s"name:String:index=true:$OPT_INDEX_VALUE=true,dtg:Date,*geom:Point:srid=4326"
       val sft = SimpleFeatureTypes.createType("test", spec)
-      sft.getDescriptor("name").isIndexValue() mustEqual(true)
+      sft.getDescriptor("name").isIndexValue() must beTrue
     }
 
     "allow specification of attribute cardinality" >> {
@@ -297,11 +314,44 @@ class SimpleFeatureTypesTest extends Specification {
       sft.getDescriptor("name").getIndexCoverage() mustEqual(IndexCoverage.JOIN)
     }
 
+    "allow attribute options with quoted commas" >> {
+      val spec = s"name:String:foo='bar,baz',dtg:Date,*geom:Point:srid=4326"
+      val sft = SimpleFeatureTypes.createType("test", spec)
+      sft.getDescriptor("name").getUserData.get("foo") mustEqual "bar,baz"
+    }
+
+    "round trip attribute options with quoted commas" >> {
+      val spec = s"name:String:foo='bar,baz',dtg:Date,*geom:Point:srid=4326"
+      val sft = SimpleFeatureTypes.createType("test", spec)
+      sft.getDescriptor("name").getUserData.get("foo") mustEqual "bar,baz"
+      val encoded = SimpleFeatureTypes.encodeType(sft)
+      val recovered = SimpleFeatureTypes.createType("test", encoded)
+      recovered.getDescriptor("name").getUserData.get("foo") mustEqual "bar,baz"
+    }
+
+    "encode date attribute types" >> {
+      val sft: SimpleFeatureType = {
+        val builder = new SimpleFeatureTypeBuilder()
+        builder.setName("test")
+        builder.add("date", classOf[java.util.Date])
+        builder.add("sqlDate", classOf[java.sql.Date])
+        builder.add("sqlTimestamp", classOf[java.sql.Timestamp])
+        builder.buildFeatureType()
+      }
+      SimpleFeatureTypes.encodeDescriptor(sft, sft.getDescriptor(0)) mustEqual "date:Date"
+      SimpleFeatureTypes.encodeDescriptor(sft, sft.getDescriptor(1)) mustEqual "sqlDate:Date"
+      SimpleFeatureTypes.encodeDescriptor(sft, sft.getDescriptor(2)) mustEqual "sqlTimestamp:Timestamp"
+    }
+
+    "create schemas from sql dates" >> {
+      SimpleFeatureTypes.createType("test", "dtg:Timestamp,*geom:Point:srid=4326")
+          .getDescriptor(0).getType.getBinding mustEqual classOf[java.sql.Timestamp]
+    }
+
     "return meaningful error messages" >> {
       Try(SimpleFeatureTypes.createType("test", null)) must
           beAFailedTry.withThrowable[IllegalArgumentException](Pattern.quote("Invalid spec string: null"))
       val failures = Seq(
-        ("", "0. Expected one of: attribute name, '*'"),
         ("foo:Strong", "7. Expected attribute type binding"),
         ("foo:String,*bar:String", "16. Expected geometry type binding"),
         ("foo:String,bar:String;;", "22. Expected one of: feature type option, end of spec"),

@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -11,8 +11,8 @@ package org.locationtech.geomesa.accumulo.index.legacy.z3
 import org.apache.accumulo.core.data.Mutation
 import org.apache.hadoop.io.Text
 import org.locationtech.geomesa.accumulo.data.{AccumuloDataStore, AccumuloFeature, EMPTY_TEXT}
-import org.locationtech.geomesa.accumulo.index.AccumuloFeatureIndex
-import org.locationtech.geomesa.accumulo.index.AccumuloFeatureIndex.{BinColumnFamily, FullColumnFamily}
+import org.locationtech.geomesa.accumulo.index.AccumuloColumnGroups.BinColumnFamily
+import org.locationtech.geomesa.accumulo.index.{AccumuloColumnGroups, AccumuloFeatureIndex}
 import org.locationtech.geomesa.curve.{BinnedTime, LegacyZ3SFC}
 import org.locationtech.geomesa.index.utils.SplitArrays
 import org.opengis.feature.simple.SimpleFeatureType
@@ -46,7 +46,7 @@ case object Z3IndexV2 extends AccumuloFeatureIndex with Z3WritableIndex with Z3Q
     sft.getDtgField.isDefined && sft.getGeometryDescriptor != null
   }
 
-  override def getSplits(sft: SimpleFeatureType): Seq[Array[Byte]] = {
+  override def getSplits(sft: SimpleFeatureType, partition: Option[String]): Seq[Array[Byte]] = {
     import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
     SplitArrays.apply(sft.getZShards)
   }
@@ -67,7 +67,7 @@ case object Z3IndexV2 extends AccumuloFeatureIndex with Z3WritableIndex with Z3Q
       val cq = if (rows.length > 1) new Text(Integer.toHexString(rows.length)) else EMPTY_TEXT
       rows.map { row =>
         val mutation = new Mutation(row)
-        wf.fullValuesWithId.foreach(value => mutation.put(FullColumnFamily, cq, value.vis, value.value))
+        wf.fullValuesWithId.foreach(value => mutation.put(AccumuloColumnGroups.default, cq, value.vis, value.value))
         wf.binValues.foreach(value => mutation.put(BinColumnFamily, cq, value.vis, value.value))
         mutation
       }
@@ -89,7 +89,7 @@ case object Z3IndexV2 extends AccumuloFeatureIndex with Z3WritableIndex with Z3Q
       val cq = if (rows.length > 1) new Text(Integer.toHexString(rows.length)) else EMPTY_TEXT
       rows.map { row =>
         val mutation = new Mutation(row)
-        wf.fullValuesWithId.foreach(value => mutation.putDelete(FullColumnFamily, cq, value.vis))
+        wf.fullValuesWithId.foreach(value => mutation.putDelete(AccumuloColumnGroups.default, cq, value.vis))
         wf.binValues.foreach(value => mutation.putDelete(BinColumnFamily, cq, value.vis))
         mutation
       }

@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,9 +8,11 @@
 
 package org.locationtech.geomesa.utils.geotools
 
+import java.util.regex.Pattern
 import java.util.{Date, UUID}
 
 import com.vividsolutions.jts.geom._
+import org.apache.commons.text.StringEscapeUtils
 import org.geotools.feature.AttributeTypeBuilder
 import org.opengis.feature.`type`.AttributeDescriptor
 import org.opengis.feature.simple.SimpleFeatureType
@@ -56,7 +58,16 @@ sealed trait AttributeSpec {
     *
     * @return a partial spec string
     */
-  def toSpec: String = s"$name:$getClassSpec${specOptions.map { case (k, v) => s":$k=$v" }.mkString}"
+  def toSpec: String = {
+    val opts = specOptions.map { case (k, v) =>
+      if (AttributeSpec.simpleOptionPattern.matcher(v).matches()) {
+        s":$k=$v"
+      } else {
+        s":$k='${StringEscapeUtils.escapeJava(v)}'"
+      }
+    }
+    s"$name:$getClassSpec${opts.mkString}"
+  }
 
   /**
     * Convert to a typesafe config map
@@ -117,6 +128,8 @@ object AttributeSpec {
 
   import SimpleFeatureTypes.AttributeOptions.{OPT_DEFAULT, OPT_INDEX, OPT_SRID}
 
+  private val simpleOptionPattern = Pattern.compile("[a-zA-Z0-9_]+")
+
   def apply(sft: SimpleFeatureType, descriptor: AttributeDescriptor): AttributeSpec = {
     import SimpleFeatureTypes.AttributeOptions.OPT_DEFAULT
     import org.locationtech.geomesa.utils.geotools.RichAttributeDescriptors.RichAttributeDescriptor
@@ -130,7 +143,7 @@ object AttributeSpec {
     if (simpleTypeMap.contains(binding.getSimpleName)) {
       SimpleAttributeSpec(name, binding, options)
     } else if (geometryTypeMap.contains(binding.getSimpleName)) {
-      val opts = if (sft.getGeometryDescriptor == descriptor) { options + (OPT_DEFAULT -> "true") } else { options }
+      val opts = if (sft != null && sft.getGeometryDescriptor == descriptor) { options + (OPT_DEFAULT -> "true") } else { options }
       GeomAttributeSpec(name, binding, opts)
     } else if (classOf[java.util.List[_]].isAssignableFrom(binding)) {
       val itemClass = Option(descriptor.getListType()).getOrElse(classOf[String])
@@ -155,11 +168,11 @@ object AttributeSpec {
     */
   case class GeomAttributeSpec(name: String, clazz: Class[_], options: Map[String, String]) extends AttributeSpec {
 
-    val default = options.get(OPT_DEFAULT).exists(_.toBoolean)
+    private val default = options.get(OPT_DEFAULT).exists(_.toBoolean)
 
-    override def toSpec = if (default) { s"*${super.toSpec}" } else { super.toSpec }
+    override def toSpec: String = if (default) { s"*${super.toSpec}" } else { super.toSpec }
 
-    override def builderHook(builder: AttributeTypeBuilder) = {
+    override def builderHook(builder: AttributeTypeBuilder): Unit = {
       require(!options.get(OPT_SRID).exists(_.toInt != 4326),
         s"Invalid SRID '${options(OPT_SRID)}'. Only 4326 is supported.")
       builder.crs(CRS_EPSG_4326)
@@ -178,7 +191,7 @@ object AttributeSpec {
   case class ListAttributeSpec(name: String, subClass: Class[_], options: Map[String, String]) extends AttributeSpec {
     import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes.AttributeConfigs.USER_DATA_LIST_TYPE
 
-    override val clazz = classOf[java.util.List[_]]
+    override val clazz: Class[java.util.List[_]] = classOf[java.util.List[_]]
     override val getClassSpec = s"List[${typeEncode(subClass)}]"
 
     override protected def specOptions: Map[String, String] = options - USER_DATA_LIST_TYPE
@@ -192,7 +205,7 @@ object AttributeSpec {
       extends AttributeSpec {
     import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes.AttributeConfigs._
 
-    override val clazz = classOf[java.util.Map[_, _]]
+    override val clazz: Class[java.util.Map[_, _]] = classOf[java.util.Map[_, _]]
     override val getClassSpec = s"Map[${typeEncode(keyClass)},${typeEncode(valueClass)}]"
 
     override protected def specOptions: Map[String, String] =
@@ -218,6 +231,7 @@ object AttributeSpec {
     classOf[MultiPolygon]        -> "MultiPolygon",
     classOf[GeometryCollection]  -> "GeometryCollection",
     classOf[Date]                -> "Date",
+    classOf[java.sql.Date]       -> "Date",
     classOf[java.sql.Timestamp]  -> "Timestamp",
     classOf[java.util.List[_]]   -> "List",
     classOf[java.util.Map[_, _]] -> "Map",
@@ -252,7 +266,7 @@ object AttributeSpec {
     "false"             -> classOf[java.lang.Boolean],
     "UUID"              -> classOf[UUID],
     "Date"              -> classOf[Date],
-    "Timestamp"         -> classOf[Date],
+    "Timestamp"         -> classOf[java.sql.Timestamp],
     "byte[]"            -> classOf[Array[Byte]],
     "Bytes"             -> classOf[Array[Byte]]
   )

@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -107,7 +107,7 @@ class GeoMesaRecordWriter[DS <: GeoMesaDataStore[DS, F, W], F <: WrappedFeature,
     val writer = writerCache.getOrElseUpdate(sftName, {
       val i = indices match {
         case Some(names) => names.map(ds.manager.index)
-        case None => ds.manager.indices(sft, IndexMode.Write)
+        case None => ds.manager.indices(sft, mode = IndexMode.Write)
       }
       ds.getIndexWriterAppend(sftName, i)
     })

@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -52,8 +52,9 @@ object AvroSimpleFeatureUtils {
 
     val fullSchema = if (withUserData) {
       withFields.name(AVRO_SIMPLE_FEATURE_USERDATA).`type`.array().items().record("userDataItem").fields()
-        .name("class").`type`.stringType().noDefault()
+        .name("keyClass").`type`.stringType().noDefault()
         .name("key").`type`.stringType().noDefault()
+        .name("valueClass").`type`.stringType().noDefault()
         .name("value").`type`.stringType().noDefault().endRecord().noDefault()
     } else {
       withFields

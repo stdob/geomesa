@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -19,7 +19,7 @@ import org.locationtech.geomesa.index.geotools.GeoMesaDataStore
 import org.locationtech.geomesa.tools.DistributedRunParam.ModeConverter
 import org.locationtech.geomesa.tools.DistributedRunParam.RunModes.RunMode
 import org.locationtech.geomesa.tools.utils.DataFormats
-import org.locationtech.geomesa.tools.utils.ParameterConverters.FilterConverter
+import org.locationtech.geomesa.tools.utils.ParameterConverters.{FilterConverter, HintConverter}
 import org.locationtech.geomesa.utils.index.IndexMode.IndexMode
 import org.opengis.filter.Filter
 
@@ -31,7 +31,7 @@ trait QueryParams extends CatalogParam with RequiredTypeNameParam with CqlFilter
 
 trait CatalogParam {
   @Parameter(names = Array("-c", "--catalog"), description = "Catalog table for GeoMesa datastore", required = true)
-  var catalog: String = null
+  var catalog: String = _
 }
 
 trait TypeNameParam {
@@ -40,32 +40,32 @@ trait TypeNameParam {
 
 trait RequiredTypeNameParam extends TypeNameParam {
   @Parameter(names = Array("-f", "--feature-name"), description = "Simple Feature Type name on which to operate", required = true)
-  var featureName: String = null
+  var featureName: String = _
 }
 
 trait OptionalTypeNameParam extends TypeNameParam {
   @Parameter(names = Array("-f", "--feature-name"), description = "Simple Feature Type name on which to operate")
-  var featureName: String = null
+  var featureName: String = _
 }
 
 trait PasswordParams {
   @Parameter(names = Array("-p", "--password"), description = "Connection password")
-  var password: String = null
+  var password: String = _
 }
 
 trait KerberosParams {
   @Parameter(names = Array("--keytab"), description = "Path to Kerberos keytab file")
-  var keytab: String = null
+  var keytab: String = _
 }
 
 trait RequiredCredentialsParams extends PasswordParams {
   @Parameter(names = Array("-u", "--user"), description = "Connection user name", required = true)
-  var user: String = null
+  var user: String = _
 }
 
 trait OptionalCredentialsParams extends PasswordParams {
   @Parameter(names = Array("-u", "--user"), description = "Connection user name")
-  var user: String = null
+  var user: String = _
 }
 
 trait FeatureSpecParam {
@@ -75,12 +75,12 @@ trait FeatureSpecParam {
 trait RequiredFeatureSpecParam extends FeatureSpecParam {
   @Parameter(names = Array("-s", "--spec"),
     description = "SimpleFeatureType specification as a GeoTools spec string, SFT config, or file with either", required = true)
-  var spec: String = null
+  var spec: String = _
 }
 
 trait OptionalFeatureSpecParam extends FeatureSpecParam {
   @Parameter(names = Array("-s", "--spec"), description = "SimpleFeatureType specification as a GeoTools spec string, SFT config, or file with either")
-  var spec: String = null
+  var spec: String = _
 }
 
 trait CqlFilterParam {
@@ -97,27 +97,28 @@ trait OptionalCqlFilterParam extends CqlFilterParam {
   var cqlFilter: Filter = _
 }
 
+trait QueryHintsParams {
+  @Parameter(names = Array("--hints"), description = "Query hints to set, in the form key1=value1;key2=value2", required = false, converter = classOf[HintConverter])
+  var hints: java.util.Map[String, String] = _
+}
+
 trait OptionalDtgParam {
   @Parameter(names = Array("--dtg"), description = "DateTime field name to use as the default dtg")
-  var dtgField: String = null
+  var dtgField: String = _
 }
 
 trait AttributesParam {
   def attributes: java.util.List[String]
 }
+
 trait OptionalAttributesParam extends AttributesParam {
   @Parameter(names = Array("-a", "--attributes"), description = "Attributes to evaluate (comma-separated)")
-  var attributes: java.util.List[String] = null
+  var attributes: java.util.List[String] = _
 }
 
 trait RequiredAttributesParam extends AttributesParam {
   @Parameter(names = Array("-a", "--attributes"), description = "Attributes to evaluate (comma-separated)", required = true)
-  var attributes: java.util.List[String] = null
-}
-
-trait OptionalSharedTablesParam {
-  @Parameter(names = Array("--use-shared-tables"), description = "Use shared tables for feature storage (true/false)", arity = 1)
-  var useSharedTables: Boolean = true //default to true in line with datastore
+  var attributes: java.util.List[String] = _
 }
 
 trait OptionalForceParam {
@@ -127,25 +128,25 @@ trait OptionalForceParam {
 
 trait OptionalPatternParam {
   @Parameter(names = Array("--pattern"), description = "Regular expression for simple feature type names")
-  var pattern: Pattern = null
+  var pattern: Pattern = _
 }
 
 trait OptionalZookeepersParam {
   @Parameter(names = Array("-z", "--zookeepers"), description = "Zookeepers (host[:port], comma separated)")
-  var zookeepers: String = null
+  var zookeepers: String = _
 }
 
 trait InputFilesParam {
-  @Parameter(description = "<file>...", required = true)
+  @Parameter(description = "<file>...")
   var files: java.util.List[String] = new util.ArrayList[String]()
 }
 
 trait InputFormatParam extends InputFilesParam {
-  import scala.collection.JavaConversions._
 
   def format: String
 
   def fmt: DataFormats.DataFormat = {
+    import scala.collection.JavaConversions._
     val fmtParam = Option(format).flatMap(f => DataFormats.values.find(_.toString.equalsIgnoreCase(f)))
     lazy val fmtFile = files.flatMap(DataFormats.fromFileName(_).right.toOption).headOption
     fmtParam.orElse(fmtFile).orNull
@@ -154,7 +155,7 @@ trait InputFormatParam extends InputFilesParam {
 
 trait OptionalInputFormatParam extends InputFormatParam {
   @Parameter(names = Array("--input-format"), description = "File format of input files (shp, csv, tsv, avro, etc). Optional, autodetection will be attempted.")
-  var format: String = null
+  var format: String = _
 }
 
 trait ConverterConfigParam {
@@ -164,38 +165,50 @@ trait ConverterConfigParam {
 trait OptionalConverterConfigParam extends ConverterConfigParam {
   @Parameter(names = Array("-C", "--converter"), description = "GeoMesa converter specification as a config string, file name, or name of an available converter",
     required = false)
-  var config: String = null
+  var config: String = _
 }
 
 trait RequiredConverterConfigParam extends ConverterConfigParam {
   @Parameter(names = Array("-C", "--converter"), description = "GeoMesa converter specification as a config string, file name, or name of an available converter",
     required = true)
-  var config: String = null
+  var config: String = _
 }
 
-trait OptionalIndexParam extends TypeNameParam {
-  @Parameter(names = Array("--index"), description = "Specify a particular index to query", required = false)
-  var index: String = null
+trait IndexParam extends TypeNameParam {
+
+  def index: String
+
+  @throws[ParameterException]
+  def loadRequiredIndex(ds: GeoMesaDataStore[_, _, _], mode: IndexMode): GeoMesaFeatureIndex[_, _, _] =
+    loadIndex(ds, mode).get
 
   @throws[ParameterException]
   def loadIndex(ds: GeoMesaDataStore[_, _, _], mode: IndexMode): Option[GeoMesaFeatureIndex[_, _, _]] = {
     Option(index).filter(_.length > 0).map { name =>
-      val untypedIndices = ds.manager.indices(ds.getSchema(featureName), mode)
-      val indices =
-        untypedIndices.asInstanceOf[Seq[GeoMesaFeatureIndex[_ <: GeoMesaDataStore[_, _, _], _ <: WrappedFeature, _]]]
-      val matched = if (name.indexOf(':') != -1) {
-        // full identifier with version
-        indices.find(_.identifier.equalsIgnoreCase(name))
-      } else {
-        // just index name
-        indices.find(_.name.equalsIgnoreCase(name))
-      }
-      matched.getOrElse {
-        throw new ParameterException(s"Specified index ' $index' not found. " +
-        s"Available indices are: ${indices.map(_.identifier).mkString(", ")}")
+      val sft = ds.getSchema(featureName)
+      def all = ds.manager.indices(sft, None, mode).asInstanceOf[Seq[GeoMesaFeatureIndex[_, _, _]]]
+      ds.manager.indices(sft, Some(name), mode) match {
+        case Nil =>
+          throw new ParameterException(s"Specified index '$index' not found. Available indices are: " +
+              all.map(i => s"${i.name}, ${i.identifier}").mkString(", "))
+        case Seq(idx) =>
+          idx.asInstanceOf[GeoMesaFeatureIndex[_ <: GeoMesaDataStore[_, _, _], _ <: WrappedFeature, _]]
+        case s =>
+          throw new ParameterException(s"Specified index '$index' is ambiguous. Available indices are: " +
+              all.map(_.identifier).mkString(", "))
       }
     }
   }
+}
+
+trait OptionalIndexParam extends IndexParam {
+  @Parameter(names = Array("--index"), description = "Specify a particular index to query", required = false)
+  var index: String = _
+}
+
+trait RequiredIndexParam extends IndexParam {
+  @Parameter(names = Array("--index"), description = "Specify a particular GeoMesa index", required = true)
+  var index: String = _
 }
 
 trait DistributedRunParam {
@@ -206,7 +219,7 @@ trait DistributedRunParam {
 object DistributedRunParam {
   object RunModes extends Enumeration {
     type RunMode = Value
-    val Distributed, Local = Value
+    val Distributed, DistributedCombine, Local = Value
   }
 
   class ModeConverter(name: String) extends BaseConverter[RunMode](name) {
@@ -217,4 +230,9 @@ object DistributedRunParam {
       }
     }
   }
+}
+
+trait OutputPathParam {
+  @Parameter(names = Array("--output"), description = "Path to use for writing output", required = true)
+  var outputPath: String = _
 }

@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -13,7 +13,7 @@ import java.nio.channels.Channels
 
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.dictionary.DictionaryProvider.MapDictionaryProvider
-import org.apache.arrow.vector.stream.ArrowStreamWriter
+import org.apache.arrow.vector.ipc.ArrowStreamWriter
 import org.locationtech.geomesa.arrow.vector.SimpleFeatureVector.SimpleFeatureEncoding
 import org.locationtech.geomesa.arrow.vector.{ArrowDictionary, SimpleFeatureVector}
 import org.locationtech.geomesa.utils.io.CloseWithLogging
@@ -104,7 +104,7 @@ object SimpleFeatureArrowFileWriter {
   def apply(sft: SimpleFeatureType,
             os: OutputStream,
             dictionaries: Map[String, ArrowDictionary] = Map.empty,
-            encoding: SimpleFeatureEncoding = SimpleFeatureEncoding.min(false),
+            encoding: SimpleFeatureEncoding = SimpleFeatureEncoding.Min,
             sort: Option[(String, Boolean)] = None)
            (implicit allocator: BufferAllocator): SimpleFeatureArrowFileWriter = {
     apply(SimpleFeatureVector.create(sft, dictionaries, encoding), os, sort)

@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -16,11 +16,12 @@ import org.locationtech.geomesa.filter.factory.FastFilterFactory
 import org.locationtech.geomesa.filter.filterToString
 import org.locationtech.geomesa.index.audit.QueryEvent
 import org.locationtech.geomesa.index.conf.QueryHints
+import org.locationtech.geomesa.index.geoserver.ViewParams
 import org.locationtech.geomesa.index.geotools.GeoMesaDataStore
-import org.locationtech.geomesa.index.iterators.{ArrowScan, DensityScan}
+import org.locationtech.geomesa.index.iterators.{ArrowScan, DensityScan, StatsScan}
 import org.locationtech.geomesa.index.planning.QueryRunner
 import org.locationtech.geomesa.index.stats.GeoMesaStats
-import org.locationtech.geomesa.index.utils.{Explainer, KryoLazyStatsUtils}
+import org.locationtech.geomesa.index.utils.Explainer
 import org.locationtech.geomesa.lambda.stream.TransientStore
 import org.locationtech.geomesa.utils.bin.BinaryOutputEncoder
 import org.locationtech.geomesa.utils.collection.{CloseableIterator, SelfClosingIterator}
@@ -54,7 +55,7 @@ class LambdaQueryRunner(persistence: DataStore, transients: LoadingCache[String,
           System.currentTimeMillis(),
           provider.getCurrentUserId,
           filterToString(query.getFilter),
-          QueryEvent.hintsToString(query.getHints),
+          ViewParams.getReadableHints(query),
           0,
           0,
           0
@@ -71,20 +72,19 @@ class LambdaQueryRunner(persistence: DataStore, transients: LoadingCache[String,
     if (hints.isStatsQuery) {
       // do the reduce here, as we can't merge json stats
       hints.put(QueryHints.Internal.SKIP_REDUCE, java.lang.Boolean.TRUE)
-      KryoLazyStatsUtils.reduceFeatures(sft, hints)(standardQuery(sft, query, explain))
+      StatsScan.reduceFeatures(sft, hints)(standardQuery(sft, query, explain))
     } else if (hints.isArrowQuery) {
       val arrowSft = hints.getTransformSchema.getOrElse(sft)
 
       val sort = hints.getArrowSort
       val batchSize = ArrowScan.getBatchSize(hints)
-      val encoding = SimpleFeatureEncoding.min(hints.isArrowIncludeFid)
+      val encoding = SimpleFeatureEncoding.min(hints.isArrowIncludeFid, hints.isArrowProxyFid)
 
       val dictionaryFields = hints.getArrowDictionaryFields
       val providedDictionaries = hints.getArrowDictionaryEncodedValues(sft)
       val cachedDictionaries: Map[String, TopK[AnyRef]] = if (!hints.isArrowCachedDictionaries) { Map.empty } else {
-        def name(i: Int): String = sft.getDescriptor(i).getLocalName
         val toLookup = dictionaryFields.filterNot(providedDictionaries.contains)
-        stats.getStats[TopK[AnyRef]](sft, toLookup).map(k => name(k.attribute) -> k).toMap
+        stats.getStats[TopK[AnyRef]](sft, toLookup).map(k => k.property -> k).toMap
       }
 
       if (hints.isArrowDoublePass ||
@@ -130,7 +130,7 @@ class LambdaQueryRunner(persistence: DataStore, transients: LoadingCache[String,
     } else if (hints.isDensityQuery) {
       DensityScan.DensitySft
     } else if (hints.isStatsQuery) {
-      KryoLazyStatsUtils.StatsSft
+      StatsScan.StatsSft
     } else {
       super.getReturnSft(sft, hints)
     }

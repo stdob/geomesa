@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -13,21 +13,17 @@ import java.util.concurrent.{ScheduledFuture, ScheduledThreadPoolExecutor, TimeU
 
 import com.google.common.collect.ImmutableSortedSet
 import com.google.common.util.concurrent.MoreExecutors
-import org.apache.accumulo.core.client.{Connector, IteratorSetting}
-import org.apache.accumulo.core.iterators.IteratorUtil.IteratorScope
+import org.apache.accumulo.core.client.Connector
 import org.apache.hadoop.io.Text
 import org.geotools.data.{Query, Transaction}
-import org.joda.time._
-import org.locationtech.geomesa.accumulo.AccumuloVersion
 import org.locationtech.geomesa.accumulo.data.{AccumuloBackedMetadata, _}
 import org.locationtech.geomesa.filter._
 import org.locationtech.geomesa.index.conf.QueryHints
+import org.locationtech.geomesa.index.iterators.StatsScan
 import org.locationtech.geomesa.index.stats.MetadataBackedStats.KeyAndStat
 import org.locationtech.geomesa.index.stats._
-import org.locationtech.geomesa.index.utils.KryoLazyStatsUtils
 import org.locationtech.geomesa.utils.collection.SelfClosingIterator
 import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
-import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes
 import org.locationtech.geomesa.utils.stats._
 import org.opengis.feature.simple.SimpleFeatureType
 import org.opengis.filter._
@@ -55,7 +51,7 @@ class AccumuloGeoMesaStats(val ds: AccumuloDataStore, statsTable: String, val ge
     override def run(): Unit = {
       import org.locationtech.geomesa.accumulo.AccumuloProperties.StatsProperties.STAT_COMPACTION_INTERVAL
       val compactInterval = STAT_COMPACTION_INTERVAL.toDuration.get.toMillis
-      if (lastCompaction.get < DateTimeUtils.currentTimeMillis() - compactInterval &&
+      if (lastCompaction.get < System.currentTimeMillis() - compactInterval &&
           compactionScheduled.compareAndSet(true, false) ) {
         compact()
       }
@@ -97,7 +93,7 @@ class AccumuloGeoMesaStats(val ds: AccumuloDataStore, statsTable: String, val ge
       val reader = ds.getFeatureReader(query, Transaction.AUTO_COMMIT)
       val result = try {
         // stats should always return exactly one result, even if there are no features in the table
-        KryoLazyStatsUtils.decodeStat(sft)(reader.next.getAttribute(0).asInstanceOf[String])
+        StatsScan.decodeStat(sft)(reader.next.getAttribute(0).asInstanceOf[String])
       } finally {
         reader.close()
       }
@@ -141,36 +137,24 @@ class AccumuloGeoMesaStats(val ds: AccumuloDataStore, statsTable: String, val ge
   def configureStatCombiner(connector: Connector, sft: SimpleFeatureType): Unit = {
     import MetadataBackedStats._
 
-    AccumuloVersion.ensureTableExists(connector, statsTable)
-    val tableOps = connector.tableOperations()
+    StatsCombiner.configure(sft, connector, statsTable, metadata.typeNameSeparator.toString)
 
-    def attach(options: Map[String, String]): Unit = {
-      // priority needs to be less than the versioning iterator at 20
-      val is = new IteratorSetting(10, CombinerName, classOf[StatsCombiner])
-      options.foreach { case (k, v) => is.addOption(k, v) }
-      tableOps.attachIterator(statsTable, is)
-
-      val keys = Seq(CountKey, BoundsKeyPrefix, TopKKeyPrefix, FrequencyKeyPrefix, HistogramKeyPrefix)
-      val splits = keys.map(k => new Text(metadata.encodeRow(sft.getTypeName, k)))
-      // noinspection RedundantCollectionConversion
-      tableOps.addSplits(statsTable, ImmutableSortedSet.copyOf(splits.toIterable))
-    }
-
-    val sftKey = s"${StatsCombiner.SftOption}${sft.getTypeName}"
-    val sftOpt = SimpleFeatureTypes.encodeType(sft)
-    val otherOpts = Map(StatsCombiner.SeparatorOption -> metadata.typeNameSeparator.toString, "all" -> "true")
-
-    val existing = tableOps.getIteratorSetting(statsTable, CombinerName, IteratorScope.scan)
-    if (existing == null) {
-      attach(Map(sftKey -> sftOpt) ++ otherOpts)
-    } else {
-      val existingSfts = existing.getOptions.filter(_._1.startsWith(StatsCombiner.SftOption))
-      if (!existingSfts.get(sftKey).exists(_ == sftOpt)) {
-        tableOps.removeIterator(statsTable, CombinerName, java.util.EnumSet.allOf(classOf[IteratorScope]))
-        attach(existingSfts.toMap ++ Map(sftKey -> sftOpt) ++ otherOpts)
-      }
-    }
+    val keys = Seq(CountKey, BoundsKeyPrefix, TopKKeyPrefix, FrequencyKeyPrefix, HistogramKeyPrefix)
+    val splits = keys.map(k => new Text(metadata.encodeRow(sft.getTypeName, k)))
+    // noinspection RedundantCollectionConversion
+    connector.tableOperations().addSplits(statsTable, ImmutableSortedSet.copyOf(splits.toIterable))
   }
+
+  /**
+    * Remove the stats combiner for a simple feature type
+    *
+    * Note: should be called with a distributed lock on the stats table
+    *
+    * @param connector accumulo connector
+    * @param sft simple feature type
+    */
+  def removeStatCombiner(connector: Connector, sft: SimpleFeatureType): Unit =
+    StatsCombiner.remove(sft, connector, statsTable, metadata.typeNameSeparator.toString)
 
   /**
     * Schedules a compaction for the stat table
@@ -183,7 +167,7 @@ class AccumuloGeoMesaStats(val ds: AccumuloDataStore, statsTable: String, val ge
   private def compact(): Unit = {
     compactionScheduled.set(false)
     ds.connector.tableOperations().compact(statsTable, null, null, true, true)
-    lastCompaction.set(DateTimeUtils.currentTimeMillis())
+    lastCompaction.set(System.currentTimeMillis())
   }
 }
 

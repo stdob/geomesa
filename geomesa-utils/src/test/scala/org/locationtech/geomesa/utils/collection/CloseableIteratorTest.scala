@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -11,17 +11,45 @@ package org.locationtech.geomesa.utils.collection
 import java.io.Closeable
 
 import org.junit.runner.RunWith
-import org.specs2.mock.Mockito
 import org.specs2.mutable.Specification
 import org.specs2.runner.JUnitRunner
 
 @RunWith(classOf[JUnitRunner])
-class CloseableIteratorTest extends Specification with Mockito {
+class CloseableIteratorTest extends Specification {
 
   "CloseableIterator" should {
     "close" >> {
       var closed = false
       val iter = CloseableIterator(Iterator.empty, { closed = true })
+      closed must beFalse
+      iter.close()
+      closed must beTrue
+    }
+    "close with map" >> {
+      var closed = false
+      val iter = CloseableIterator(Iterator(0, 1), { closed = true }).map(i => i + 1)
+      closed must beFalse
+      iter.toSeq mustEqual Seq(1, 2)
+      closed must beFalse
+      iter.close()
+      closed must beTrue
+    }
+    "close with filter" >> {
+      var closed = false
+      val iter = CloseableIterator(Iterator(0, 1), { closed = true }).filter(i => i % 2 == 0)
+      closed must beFalse
+      iter.toSeq mustEqual Seq(0)
+      closed must beFalse
+      iter.close()
+      closed must beTrue
+    }
+    "close with collect" >> {
+      var closed = false
+      val iter = CloseableIterator(Iterator(0, 1), { closed = true }).collect {
+        case i if i % 2 == 0 => i + 1
+      }
+      closed must beFalse
+      iter.toSeq mustEqual Seq(1)
       closed must beFalse
       iter.close()
       closed must beTrue

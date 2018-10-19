@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -12,7 +12,7 @@ import java.awt.image.BufferedImage
 import java.io.{Closeable, Serializable}
 import java.util.Map.Entry
 import java.util.concurrent.TimeUnit
-import java.util.{Map => JMap}
+import java.util.{Date, Map => JMap}
 
 import com.github.benmanes.caffeine.cache.Caffeine
 import com.google.common.collect.{ImmutableMap, ImmutableSetMultimap}
@@ -21,7 +21,6 @@ import org.apache.accumulo.core.client.{BatchWriterConfig, Connector, TableExist
 import org.apache.accumulo.core.data.{Key, Mutation, Range, Value}
 import org.apache.accumulo.core.security.TablePermission
 import org.geotools.coverage.grid.GridEnvelope2D
-import org.joda.time.DateTime
 import org.locationtech.geomesa.accumulo.audit.AccumuloAuditService
 import org.locationtech.geomesa.accumulo.security.AccumuloAuthsProvider
 import org.locationtech.geomesa.raster._
@@ -30,7 +29,6 @@ import org.locationtech.geomesa.raster.iterators.BBOXCombiner._
 import org.locationtech.geomesa.raster.util.RasterUtils
 import org.locationtech.geomesa.utils.collection.SelfClosingIterator
 import org.locationtech.geomesa.utils.geohash.BoundingBox
-import org.locationtech.geomesa.utils.stats.{MethodProfiling, NoOpTimings, Timings, TimingsImpl}
 
 import scala.collection.JavaConversions._
 
@@ -41,7 +39,7 @@ class AccumuloRasterStore(val connector: Connector,
                           writeMemoryConfig: Option[String] = None,
                           writeThreadsConfig: Option[Int] = None,
                           queryThreadsConfig: Option[Int] = None,
-                          collectStats: Boolean = false) extends Closeable with MethodProfiling with LazyLogging {
+                          collectStats: Boolean = false) extends Closeable with LazyLogging {
 
   val writeMemory = writeMemoryConfig.getOrElse("10000").toLong
   val writeThreads = writeThreadsConfig.getOrElse(10)
@@ -67,26 +65,19 @@ class AccumuloRasterStore(val connector: Connector,
    * @return Buffered
    */
   def getMosaicedRaster(query: RasterQuery, params: GeoMesaCoverageQueryParams): BufferedImage = {
-    implicit val timings = if (collectStats) new TimingsImpl else NoOpTimings
-    val rasters = getRasters(query)
-    val (image, numRasters) = profile("mosaic") {
-      RasterUtils.mosaicChunks(rasters, params.width.toInt, params.height.toInt, params.envelope)
-    }
-    image
+    RasterUtils.mosaicChunks(getRasters(query), params.width.toInt, params.height.toInt, params.envelope)._1
   }
 
-  def getRasters(rasterQuery: RasterQuery)(implicit timings: Timings): Iterator[Raster] = {
-    profile("scanning") {
-      val batchScanner = connector.createBatchScanner(tableName, getAuths, numQThreads)
-      val plan = AccumuloRasterQueryPlanner.getQueryPlan(rasterQuery, getResToGeoHashLenMap, getResToBoundsMap)
-      plan match {
-        case Some(qp) =>
-          qp.iterators.foreach(batchScanner.addScanIterator)
-          qp.columnFamilies.foreach(batchScanner.fetchColumnFamily)
-          batchScanner.setRanges(qp.ranges)
-          adaptIteratorToChunks(SelfClosingIterator(batchScanner.iterator, batchScanner.close))
-        case _        => Iterator.empty
-      }
+  def getRasters(rasterQuery: RasterQuery): Iterator[Raster] = {
+    val batchScanner = connector.createBatchScanner(tableName, getAuths, numQThreads)
+    val plan = AccumuloRasterQueryPlanner.getQueryPlan(rasterQuery, getResToGeoHashLenMap, getResToBoundsMap)
+    plan match {
+      case Some(qp) =>
+        qp.iterators.foreach(batchScanner.addScanIterator)
+        qp.columnFamilies.foreach(batchScanner.fetchColumnFamily)
+        batchScanner.setRanges(qp.ranges)
+        adaptIteratorToChunks(SelfClosingIterator(batchScanner.iterator, batchScanner.close))
+      case _        => Iterator.empty
     }
   }
 
@@ -165,7 +156,7 @@ class AccumuloRasterStore(val connector: Connector,
     iter.map(entry => RasterIndexSchema.decode((entry.getKey, entry.getValue)))
   }
 
-  private def dateToAccTimestamp(dt: DateTime): Long =  dt.getMillis / 1000
+  private def dateToAccTimestamp(dt: Date): Long =  dt.getTime / 1000
 
   private def createBoundsMutation(raster: Raster): Mutation = {
     // write the bounds mutation

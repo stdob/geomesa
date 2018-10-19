@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,8 +8,9 @@
 
 package org.locationtech.geomesa.accumulo.audit
 
+import java.time.ZonedDateTime
+
 import org.apache.accumulo.core.client.Connector
-import org.joda.time.Interval
 import org.locationtech.geomesa.accumulo.security.AccumuloAuthsProvider
 import org.locationtech.geomesa.index.audit.QueryEvent
 import org.locationtech.geomesa.utils.audit._
@@ -21,7 +22,7 @@ class AccumuloAuditService(connector: Connector,
                            val table: String,
                            write: Boolean) extends AuditWriter with AuditReader with AuditLogger {
 
-  private val writer = if (write) new AccumuloEventWriter(connector, table) else null
+  private val writer = if (write) { new AccumuloEventWriter(connector, table) } else { null }
   private val reader = new AccumuloEventReader(connector, table)
 
   override def writeEvent[T <: AuditedEvent](event: T)(implicit ct: ClassTag[T]): Unit = {
@@ -31,7 +32,9 @@ class AccumuloAuditService(connector: Connector,
     super.writeEvent(event)
   }
 
-  override def getEvents[T <: AuditedEvent](typeName: String, dates: Interval)(implicit ct: ClassTag[T]): Iterator[T] = {
+  override def getEvents[T <: AuditedEvent](typeName: String,
+                                            dates: (ZonedDateTime, ZonedDateTime))
+                                           (implicit ct: ClassTag[T]): Iterator[T] = {
     val iter = reader.query(typeName, dates, authProvider.getAuthorizations)(transform(ct.runtimeClass.asInstanceOf[Class[T]]))
     iter.asInstanceOf[Iterator[T]]
   }

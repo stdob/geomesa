@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -10,7 +10,7 @@ package org.locationtech.geomesa.utils.text
 
 import java.util.regex.Pattern
 
-import org.apache.commons.lang.StringEscapeUtils
+import org.apache.commons.text.StringEscapeUtils
 import org.parboiled.scala._
 import org.parboiled.scala.rules.Rule1
 
@@ -21,9 +21,19 @@ class BasicParser extends Parser {
 
   private val controlCharPattern = Pattern.compile("""\p{Cntrl}""")
 
-  def int: Rule1[Int] = rule { (optional("-") ~ oneOrMore("0" - "9")) ~> (_.toInt) }
+  def int: Rule1[Int] = rule { group(optional("-") ~ oneOrMore("0" - "9")) ~> (_.toInt) }
 
-  def long: Rule1[Long] = rule { (optional("-") ~ oneOrMore("0" - "9")) ~> (_.toLong) }
+  def long: Rule1[Long] = rule { group(optional("-") ~ oneOrMore("0" - "9")) ~> (_.toLong) ~ "L" }
+
+  def float: Rule1[Float] = rule {
+    group(optional("-") ~ zeroOrMore("0" - "9") ~ "." ~ oneOrMore("0" - "9")) ~> (_.toFloat) ~ ("f" | "F")
+  }
+
+  def double: Rule1[Double] = rule {
+    group(optional("-") ~ zeroOrMore("0" - "9") ~ "." ~ oneOrMore("0" - "9")) ~> (_.toDouble) ~ optional("d" | "D")
+  }
+
+  def boolean: Rule1[Boolean] = rule { (ignoreCase("true") | ignoreCase("false")) ~> (_.toBoolean) }
 
   def char: Rule0 = rule { "a" - "z" | "A" - "Z" | "0" - "9" | "_" }
 
@@ -38,6 +48,8 @@ class BasicParser extends Parser {
   def singleQuotedString: Rule1[String] = rule {
     "'" ~ zeroOrMore((noneOf("""\'""") ~? notControlChar) | escapedChar) ~> StringEscapeUtils.unescapeJava ~ "'"
   }
+
+  def whitespace: Rule0 = rule { zeroOrMore(anyOf(" \n\r\t\f")) }
 
   private def escapedChar: Rule0 = rule {
     "\\" ~ (anyOf("""\/"'bfnrt""") | "u" ~ nTimes(4, "0" - "9" | "a" - "f" | "A" - "F"))

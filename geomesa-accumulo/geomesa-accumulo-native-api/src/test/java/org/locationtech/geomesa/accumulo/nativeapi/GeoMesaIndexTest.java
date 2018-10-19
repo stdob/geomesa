@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -28,15 +28,25 @@ import org.junit.Test;
 import org.locationtech.geomesa.accumulo.data.AccumuloDataStore;
 import org.locationtech.geomesa.accumulo.index.AccumuloFeatureIndex;
 import org.locationtech.geomesa.accumulo.index.AccumuloFeatureIndex$;
-import org.locationtech.geomesa.api.*;
+import org.locationtech.geomesa.api.DefaultSimpleFeatureView;
+import org.locationtech.geomesa.api.GeoMesaIndex;
+import org.locationtech.geomesa.api.GeoMesaQuery;
+import org.locationtech.geomesa.api.SimpleFeatureView;
+import org.locationtech.geomesa.api.ValueSerializer;
 import org.locationtech.geomesa.utils.index.IndexMode$;
 import org.opengis.feature.simple.SimpleFeature;
 import org.opengis.feature.type.AttributeDescriptor;
 import org.opengis.filter.FilterFactory2;
+import scala.Option$;
 
 import javax.annotation.Nullable;
 import java.time.ZonedDateTime;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.Map;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 public class GeoMesaIndexTest {
 
@@ -294,10 +304,10 @@ public class GeoMesaIndexTest {
 
         // require that the function to pre-compute the names of all tables for this feature type is accurate
         scala.collection.Iterator<AccumuloFeatureIndex> indices =
-                AccumuloFeatureIndex$.MODULE$.indices(ds.getSchema(featureName), IndexMode$.MODULE$.Any()).iterator();
+                AccumuloFeatureIndex$.MODULE$.indices(ds.getSchema(featureName), scala.Option.apply(null), IndexMode$.MODULE$.Any()).iterator();
         List<String> expectedTables = new ArrayList<>();
         while (indices.hasNext()) {
-            expectedTables.add(indices.next().getTableName(featureName, ds));
+            expectedTables.add(indices.next().getTableNames(ds.getSchema(featureName), ds, Option$.MODULE$.empty()).head());
         }
         expectedTables.add(featureName);
         expectedTables.add(featureName + "_stats");

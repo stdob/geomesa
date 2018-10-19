@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -22,6 +22,7 @@ import org.locationtech.geomesa.index.metadata.GeoMesaMetadata._
 import org.locationtech.geomesa.index.metadata.HasGeoMesaMetadata
 import org.locationtech.geomesa.index.utils.{DistributedLocking, Releasable}
 import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
+import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes.Configs.{DEFAULT_DATE_KEY, ST_INDEX_SCHEMA_KEY, TABLE_SHARING_KEY}
 import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes.InternalConfigs.SHARING_PREFIX_KEY
 import org.locationtech.geomesa.utils.geotools.{GeoToolsDateFormat, SimpleFeatureTypes}
 import org.locationtech.geomesa.utils.index.GeoMesaSchemaValidator
@@ -39,6 +40,7 @@ import scala.util.control.NonFatal
 abstract class MetadataBackedDataStore(config: NamespaceConfig) extends DataStore
     with HasGeoMesaMetadata[String] with DistributedLocking with LazyLogging {
 
+  // TODO: GEOMESA-2360 - Remove global axis order hint from MetadataBackedDataStore
   Hints.putSystemDefault(Hints.FORCE_LONGITUDE_FIRST_AXIS_ORDER, true)
 
   protected def catalog: String
@@ -140,8 +142,11 @@ abstract class MetadataBackedDataStore(config: NamespaceConfig) extends DataStor
             writeMetadata(sft)
 
             // reload the sft so that we have any default metadata,
-            // then copy over any additional keys that were in the original sft
-            val reloadedSft = getSchema(sft.getTypeName)
+            // then copy over any additional keys that were in the original sft.
+            // avoid calling getSchema directly, as that may trigger a remote version
+            // check for indices that haven't been created yet
+            val attributes = metadata.readRequired(sft.getTypeName, ATTRIBUTES_KEY)
+            val reloadedSft = SimpleFeatureTypes.createType(sft.getTypeName, attributes)
             (sft.getUserData.keySet -- reloadedSft.getUserData.keySet)
               .foreach(k => reloadedSft.getUserData.put(k, sft.getUserData.get(k)))
 
@@ -207,9 +212,6 @@ abstract class MetadataBackedDataStore(config: NamespaceConfig) extends DataStor
     * @param sft new simple feature type
     */
   override def updateSchema(typeName: Name, sft: SimpleFeatureType): Unit = {
-    import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes.Configs._
-    import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes.InternalConfigs._
-
     // validate type name has not changed
     if (typeName.getLocalPart != sft.getTypeName) {
       val msg = s"Updating the name of a schema is not allowed: '$typeName' changed to '${sft.getTypeName}'"
@@ -231,10 +233,7 @@ abstract class MetadataBackedDataStore(config: NamespaceConfig) extends DataStor
       }
 
       // Check that unmodifiable user data has not changed
-      val unmodifiableUserdataKeys =
-        Set(SCHEMA_VERSION_KEY, TABLE_SHARING_KEY, SHARING_PREFIX_KEY, DEFAULT_DATE_KEY, ST_INDEX_SCHEMA_KEY)
-
-      unmodifiableUserdataKeys.foreach { key =>
+      MetadataBackedDataStore.unmodifiableUserdataKeys.foreach { key =>
         if (sft.userData[Any](key) != previousSft.userData[Any](key)) {
           throw new UnsupportedOperationException(s"Updating '$key' is not supported")
         }
@@ -357,7 +356,7 @@ abstract class MetadataBackedDataStore(config: NamespaceConfig) extends DataStor
     * Acquires a distributed lock for all data stores sharing this catalog table.
     * Make sure that you 'release' the lock in a finally block.
     */
-  protected def acquireCatalogLock(): Releasable = {
+  protected [geomesa] def acquireCatalogLock(): Releasable = {
     val path = s"/org.locationtech.geomesa/ds/$catalog"
     acquireDistributedLock(path, 120000).getOrElse {
       throw new RuntimeException(s"Could not acquire distributed lock at '$path'")
@@ -405,4 +404,8 @@ abstract class MetadataBackedDataStore(config: NamespaceConfig) extends DataStor
 
     metadata.insert(sft.getTypeName, metadataMap)
   }
+}
+
+object MetadataBackedDataStore {
+  private val unmodifiableUserdataKeys = Set(TABLE_SHARING_KEY, SHARING_PREFIX_KEY, DEFAULT_DATE_KEY, ST_INDEX_SCHEMA_KEY)
 }

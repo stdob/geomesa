@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -9,14 +9,15 @@
 package org.locationtech.geomesa.utils.geotools
 
 import java.nio.charset.StandardCharsets
-import java.util.Date
+import java.util.{Date, UUID}
 
 import com.vividsolutions.jts.geom._
 import org.geotools.feature.AttributeTypeBuilder
 import org.geotools.geometry.DirectPosition2D
-import org.locationtech.geomesa.CURRENT_SCHEMA_VERSION
 import org.locationtech.geomesa.curve.TimePeriod.TimePeriod
 import org.locationtech.geomesa.curve.{TimePeriod, XZSFC}
+import org.locationtech.geomesa.utils.conf.SemanticVersion
+import org.locationtech.geomesa.utils.geometry.GeometryPrecision
 import org.locationtech.geomesa.utils.index.IndexMode.IndexMode
 import org.locationtech.geomesa.utils.index.VisibilityLevel
 import org.locationtech.geomesa.utils.index.VisibilityLevel.VisibilityLevel
@@ -28,7 +29,6 @@ import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 
 import scala.reflect.ClassTag
 import scala.util.Try
-import scala.util.parsing.combinator.JavaTokenParsers
 
 object Conversions {
 
@@ -38,7 +38,7 @@ object Conversions {
 
   implicit class RichGeometry(val geom: Geometry) extends AnyVal {
     def bufferMeters(meters: Double): Geometry = geom.buffer(distanceDegrees(meters))
-    def distanceDegrees(meters: Double): Double = GeometryUtils.distanceDegrees(geom, meters)
+    def distanceDegrees(meters: Double): Double = GeometryUtils.distanceDegrees(geom, meters)._2
     def safeCentroid(): Point = {
       val centroid = geom.getCentroid
       if (java.lang.Double.isNaN(centroid.getCoordinate.x) || java.lang.Double.isNaN(centroid.getCoordinate.y)) {
@@ -69,12 +69,34 @@ object Conversions {
       case _         => throw new Exception(s"Input $v is not a numeric type.")
     }
 
-    def userData[T](key: AnyRef)(implicit ct: ClassTag[T]): Option[T] = {
-      Option(sf.getUserData.get(key)).flatMap {
-        case ct(x) => Some(x)
-        case _ => None
+    /**
+      * Gets the feature ID as a parsed UUID consisting of (msb, lsb). Caches the bits
+      * in the user data for retrieval.
+      *
+      * Note: this method assumes that the feature ID is a UUID - should first check this
+      * with `sft.isUuid`
+      *
+      * @return (most significant bits, least significant bits)
+      */
+    def getUuid: (Long, Long) = {
+      var bits: (Long, Long) = sf.getUserData.get("uuid").asInstanceOf[(Long, Long)]
+      if (bits == null) {
+        val uuid = UUID.fromString(sf.getID)
+        bits = (uuid.getMostSignificantBits, uuid.getLeastSignificantBits)
+        sf.getUserData.put("uuid", bits)
       }
+      bits
     }
+
+    /**
+      * Cache a parsed uuid for later lookup with `getUuid`
+      *
+      * @param uuid (most significant bits, least significant bits)
+      */
+    def cacheUuid(uuid: (Long, Long)): Unit = sf.getUserData.put("uuid", uuid)
+
+    def userData[T](key: AnyRef)(implicit ct: ClassTag[T]): Option[T] =
+      Option(sf.getUserData.get(key)).collect { case ct(x) => x }
   }
 }
 
@@ -109,9 +131,12 @@ object RichAttributeDescriptors {
     } else {
       ad.getUserData.remove(OPT_STATS)
     }
-    def isKeepStats(): Boolean = Option(ad.getUserData.get(OPT_STATS)).exists(_ == "true")
+    def isKeepStats(): Boolean = Option(ad.getUserData.get(OPT_STATS)).contains("true")
 
-    def isIndexValue(): Boolean = Option(ad.getUserData.get(OPT_INDEX_VALUE)).exists(_ == "true")
+    def isIndexValue(): Boolean = Option(ad.getUserData.get(OPT_INDEX_VALUE)).contains("true")
+
+    def getColumnGroups(): Set[String] =
+      Option(ad.getUserData.get(OPT_COL_GROUPS).asInstanceOf[String]).map(_.split(",").toSet).getOrElse(Set.empty)
 
     def setCardinality(cardinality: Cardinality): Unit =
       ad.getUserData.put(OPT_CARDINALITY, cardinality.toString)
@@ -120,11 +145,11 @@ object RichAttributeDescriptors {
       Option(ad.getUserData.get(OPT_CARDINALITY).asInstanceOf[String])
           .flatMap(c => Try(Cardinality.withName(c)).toOption).getOrElse(Cardinality.UNKNOWN)
 
-    def isJson(): Boolean = Option(ad.getUserData.get(OPT_JSON)).exists(_ == "true")
+    def isJson(): Boolean = Option(ad.getUserData.get(OPT_JSON)).contains("true")
 
     def setBinTrackId(opt: Boolean): Unit = ad.getUserData.put(OPT_BIN_TRACK_ID, opt.toString)
 
-    def isBinTrackId(): Boolean = Option(ad.getUserData.get(OPT_BIN_TRACK_ID)).exists(_ == "true")
+    def isBinTrackId(): Boolean = Option(ad.getUserData.get(OPT_BIN_TRACK_ID)).contains("true")
 
     def setListType(typ: Class[_]): Unit = ad.getUserData.put(USER_DATA_LIST_TYPE, typ.getName)
 
@@ -151,6 +176,16 @@ object RichAttributeDescriptors {
       ad.getUserData.containsKey(USER_DATA_MAP_KEY_TYPE) && ad.getUserData.containsKey(USER_DATA_MAP_VALUE_TYPE)
 
     def isMultiValued: Boolean = isList || isMap
+
+    def getPrecision: GeometryPrecision = {
+      Option(ad.getUserData.get(OPT_PRECISION).asInstanceOf[String]).map(_.split(',')) match {
+        case None => GeometryPrecision.FullPrecision
+        case Some(Array(xy)) => GeometryPrecision.TwkbPrecision(xy.toByte)
+        case Some(Array(xy, z)) => GeometryPrecision.TwkbPrecision(xy.toByte, z.toByte)
+        case Some(Array(xy, z, m)) => GeometryPrecision.TwkbPrecision(xy.toByte, z.toByte, m.toByte)
+        case Some(p) => throw new IllegalArgumentException(s"Invalid geometry precision: ${p.mkString(",")}")
+      }
+    }
   }
 
   implicit class RichAttributeTypeBuilder(val builder: AttributeTypeBuilder) extends AnyVal {
@@ -183,9 +218,9 @@ object RichSimpleFeatureType {
 
     def getGeomField: String = {
       val gd = sft.getGeometryDescriptor
-      if (gd == null) null else gd.getLocalName
+      if (gd == null) { null } else { gd.getLocalName }
     }
-    def getGeomIndex: Int = sft.indexOf(getGeomField)
+    def getGeomIndex: Int = Option(getGeomField).map(sft.indexOf).getOrElse(-1)
 
     def getDtgField: Option[String] = userData[String](DEFAULT_DATE_KEY)
     def getDtgIndex: Option[Int] = getDtgField.map(sft.indexOf).filter(_ != -1)
@@ -204,10 +239,6 @@ object RichSimpleFeatureType {
     def isLogicalTime: Boolean = userData[String](LOGICAL_TIME_KEY).forall(_.toBoolean)
 
     def getBinTrackId: Option[String] = sft.getAttributeDescriptors.find(_.isBinTrackId()).map(_.getLocalName)
-
-    def getSchemaVersion: Int =
-      userData[String](SCHEMA_VERSION_KEY).map(_.toInt).getOrElse(CURRENT_SCHEMA_VERSION)
-    def setSchemaVersion(version: Int): Unit = sft.getUserData.put(SCHEMA_VERSION_KEY, version.toString)
 
     def isPoints: Boolean = {
       val gd = sft.getGeometryDescriptor
@@ -250,6 +281,11 @@ object RichSimpleFeatureType {
       Array.empty[Byte]
     }
 
+    def setCompression(c: String): Unit = {
+      sft.getUserData.put(COMPRESSION_ENABLED, "true")
+      sft.getUserData.put(COMPRESSION_TYPE, c)
+    }
+
     // gets (name, version, mode) of enabled indices
     def getIndices: Seq[(String, Int, IndexMode)] = {
       def toTuple(string: String): (String, Int, IndexMode) = {
@@ -265,9 +301,10 @@ object RichSimpleFeatureType {
     def getUserDataPrefixes: Seq[String] =
       Seq(GEOMESA_PREFIX) ++ userData[String](USER_DATA_PREFIX).map(_.split(",")).getOrElse(Array.empty)
 
+    @deprecated("Table splitter key can vary with partitioning scheme")
     def getTableSplitter: Option[Class[_]] = userData[String](TABLE_SPLITTER).map(Class.forName)
-    def getTableSplitterOptions: Map[String, String] =
-      userData[String](TABLE_SPLITTER_OPTS).map(new KVPairParser().parse).getOrElse(Map.empty)
+    @deprecated("Table splitter options key can vary with partitioning scheme")
+    def getTableSplitterOptions: String = userData[String](TABLE_SPLITTER_OPTS).orNull
 
     def setZShards(splits: Int): Unit = sft.getUserData.put(Z_SPLITS_KEY, splits.toString)
     def getZShards: Int = userData[String](Z_SPLITS_KEY).map(_.toInt).getOrElse(4)
@@ -275,7 +312,16 @@ object RichSimpleFeatureType {
     def setAttributeShards(splits: Int): Unit = sft.getUserData.put(ATTR_SPLITS_KEY, splits.toString)
     def getAttributeShards: Int = userData[String](ATTR_SPLITS_KEY).map(_.toInt).getOrElse(4)
 
-    def userData[T](key: AnyRef): Option[T] = Option(sft.getUserData.get(key).asInstanceOf[T])
+    def setIdShards(splits: Int): Unit = sft.getUserData.put(ID_SPLITS_KEY, splits.toString)
+    def getIdShards: Int = userData[String](ID_SPLITS_KEY).map(_.toInt).getOrElse(4)
+
+    def setUuid(uuid: Boolean): Unit = sft.getUserData.put(FID_UUID_KEY, String.valueOf(uuid))
+    def isUuid: Boolean = userData[String](FID_UUID_KEY).exists(java.lang.Boolean.parseBoolean)
+    def isUuidEncoded: Boolean = isUuid && userData[String](FID_UUID_ENCODED_KEY).forall(java.lang.Boolean.parseBoolean)
+
+    def setRemoteVersion(version: SemanticVersion): Unit = sft.getUserData.put(REMOTE_VERSION, String.valueOf(version))
+    def getRemoteVersion: Option[SemanticVersion] =
+      Option(sft.getUserData.get(REMOTE_VERSION).asInstanceOf[String]).map(SemanticVersion.apply)
 
     def getKeywords: Set[String] =
       userData[String](KEYWORDS_KEY).map(_.split(KEYWORDS_DELIMITER).toSet).getOrElse(Set.empty)
@@ -287,19 +333,7 @@ object RichSimpleFeatureType {
       sft.getUserData.put(KEYWORDS_KEY, getKeywords.diff(keywords).mkString(KEYWORDS_DELIMITER))
 
     def removeAllKeywords(): Unit = sft.getUserData.remove(KEYWORDS_KEY)
-  }
 
-  private class KVPairParser(pairSep: String = ",", kvSep: String = ":") extends JavaTokenParsers {
-    def key = "[0-9a-zA-Z\\.]+".r
-    def value = s"[^($pairSep)^($kvSep)]+".r
-
-    def keyValue = key ~ kvSep ~ value ^^ { case key ~ sep ~ value => key -> value }
-    def keyValueList = repsep(keyValue, pairSep) ^^ { x => x.toMap }
-
-    def parse(s: String): Map[String, String] = parse(keyValueList, s.trim) match {
-      case Success(result, next) if next.atEnd => result
-      case NoSuccess(msg, next) if next.atEnd => throw new IllegalArgumentException(s"Error parsing spec '$s' : $msg")
-      case other => throw new IllegalArgumentException(s"Error parsing spec '$s' : $other")
-    }
+    def userData[T](key: AnyRef): Option[T] = Option(sft.getUserData.get(key).asInstanceOf[T])
   }
 }

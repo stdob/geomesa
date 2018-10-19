@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -15,7 +15,6 @@ import com.google.common.io.Resources
 import org.apache.commons.io.IOUtils
 import org.apache.commons.net.DefaultSocketFactory
 import org.geotools.data.DataStoreFinder
-import org.geotools.factory.CommonFactoryFinder
 import org.junit.runner.RunWith
 import org.opengis.feature.simple.SimpleFeature
 import org.opengis.filter.Filter
@@ -28,13 +27,16 @@ import scala.concurrent.Future
 @RunWith(classOf[JUnitRunner])
 class StreamDataStoreTest extends Specification {
 
+  import org.locationtech.geomesa.filter.ff
+
+  import scala.concurrent.ExecutionContext.Implicits.global
+
   sequential
 
   val count  = new AtomicLong(0)
   val count2 = new AtomicLong(0)
   val count3 = new AtomicLong(0)
 
-  val ff = CommonFactoryFinder.getFilterFactory2()
   val sourceConf =
     """
       |{

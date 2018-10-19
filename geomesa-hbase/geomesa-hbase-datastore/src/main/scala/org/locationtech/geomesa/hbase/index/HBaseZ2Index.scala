@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -19,11 +19,11 @@ import org.opengis.feature.simple.SimpleFeatureType
 case object HBaseZ2Index extends HBaseLikeZ2Index with HBasePlatform with HBaseZ2PushDown
 
 trait HBaseLikeZ2Index extends HBaseFeatureIndex with HBaseIndexAdapter
-    with Z2Index[HBaseDataStore, HBaseFeature, Mutation, Query, ScanConfig] {
+    with Z2Index[HBaseDataStore, HBaseFeature, Mutation, Scan, ScanConfig] {
   override val version: Int = 2
 }
 
-trait HBaseZ2PushDown extends Z2Index[HBaseDataStore, HBaseFeature, Mutation, Query, ScanConfig] {
+trait HBaseZ2PushDown extends Z2Index[HBaseDataStore, HBaseFeature, Mutation, Scan, ScanConfig] {
 
   override protected def updateScanConfig(sft: SimpleFeatureType,
                                           config: ScanConfig,
@@ -31,7 +31,7 @@ trait HBaseZ2PushDown extends Z2Index[HBaseDataStore, HBaseFeature, Mutation, Qu
     import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
     val z2Filter = indexValues.map { values =>
       val offset = if (sft.isTableSharing) { 2 } else { 1 } // sharing + shard - note: currently sharing is always false
-      (Z2HBaseFilter.Priority, new Z2HBaseFilter(Z2Filter(values), offset))
+      (Z2HBaseFilter.Priority, Z2HBaseFilter(Z2Filter(values), offset))
     }
     config.copy(filters = config.filters ++ z2Filter)
   }

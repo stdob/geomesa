@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -13,22 +13,27 @@ import org.geotools.filter.capability.FunctionNameImpl
 import org.geotools.filter.capability.FunctionNameImpl._
 import org.opengis.feature.simple.SimpleFeature
 
-class FastProperty extends FunctionExpressionImpl(
-  new FunctionNameImpl("fastproperty",
-    parameter("propertyValue", classOf[Object]),
-    parameter("propertyIndex", classOf[Integer]))) {
+class FastProperty extends FunctionExpressionImpl(FastProperty.Name) {
 
-  var idx = -1
+  private var idx: Int = -1
 
   def this(i: Int) = {
     this()
     idx = i
   }
 
-  override def evaluate(o: java.lang.Object): AnyRef = {
+  override def evaluate(o: AnyRef): AnyRef = {
     if (idx == -1) {
       idx = getExpression(0).evaluate(null).asInstanceOf[Long].toInt
     }
     o.asInstanceOf[SimpleFeature].getAttribute(idx)
   }
+}
+
+object FastProperty {
+  val Name = new FunctionNameImpl(
+    "fastproperty",
+    parameter("propertyValue", classOf[Object]),
+    parameter("propertyIndex", classOf[Integer])
+  )
 }

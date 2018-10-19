@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -53,15 +53,4 @@ class BinExporter(hints: Hints, os: OutputStream) extends FeatureExporter {
   }
 
   override def close(): Unit = os.close()
-}
-
-object BinExporter {
-
-  def getAttributeList(sft: SimpleFeatureType, hints: Hints): Seq[String] = {
-    import org.locationtech.geomesa.index.conf.QueryHints.RichHints
-    import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
-    val geom = hints.getBinGeomField.orElse(Option(sft.getGeomField))
-    val dtg = hints.getBinDtgField.orElse(sft.getDtgField)
-    (Seq(hints.getBinTrackIdField) ++ geom ++ dtg ++ hints.getBinLabelField).filter(_ != "id")
-  }
 }

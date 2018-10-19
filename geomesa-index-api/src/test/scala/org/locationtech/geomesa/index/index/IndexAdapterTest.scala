@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -9,6 +9,7 @@
 package org.locationtech.geomesa.index.index
 
 import org.junit.runner.RunWith
+import org.locationtech.geomesa.utils.index.ByteArrays
 import org.specs2.mutable.Specification
 import org.specs2.runner.JUnitRunner
 
@@ -27,7 +28,7 @@ class IndexAdapterTest extends Specification {
     }
     "split prefix ranges" in {
       val start = Array[Byte](0)
-      val stop = IndexAdapter.rowFollowingPrefix(start)
+      val stop = ByteArrays.rowFollowingPrefix(start)
 
       forall(Seq(2, 4, 8, 16)) { count =>
         val splits = IndexAdapter.splitRange(start, stop, count)

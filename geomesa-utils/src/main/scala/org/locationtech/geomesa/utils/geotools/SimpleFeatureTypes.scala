@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -11,7 +11,7 @@ package org.locationtech.geomesa.utils.geotools
 import java.util.Date
 
 import com.typesafe.config.Config
-import org.apache.commons.lang.StringEscapeUtils
+import org.apache.commons.text.StringEscapeUtils
 import org.geotools.feature.simple.SimpleFeatureTypeBuilder
 import org.locationtech.geomesa.utils.geotools.AttributeSpec.GeomAttributeSpec
 import org.locationtech.geomesa.utils.geotools.NameableFeatureTypeFactory.NameableSimpleFeatureType
@@ -26,34 +26,42 @@ object SimpleFeatureTypes {
   import org.locationtech.geomesa.utils.geotools.RichAttributeDescriptors._
 
   object Configs {
-    val TABLE_SHARING_KEY   = "geomesa.table.sharing"
-    val DEFAULT_DATE_KEY    = "geomesa.index.dtg"
-    val IGNORE_INDEX_DTG    = "geomesa.ignore.dtg"
-    val VIS_LEVEL_KEY       = "geomesa.visibility.level"
-    val Z3_INTERVAL_KEY     = "geomesa.z3.interval"
-    val XZ_PRECISION_KEY    = "geomesa.xz.precision"
-    val TABLE_SPLITTER      = "table.splitter.class"
-    val TABLE_SPLITTER_OPTS = "table.splitter.options"
-    val MIXED_GEOMETRIES    = "geomesa.mixed.geometries"
-    val RESERVED_WORDS      = "override.reserved.words" // note: doesn't start with geomesa so we don't persist it
-    val DEFAULT_DTG_JOIN    = "override.index.dtg.join"
-    val KEYWORDS_KEY        = "geomesa.keywords"
-    val ENABLED_INDICES     = "geomesa.indices.enabled"
+    val TABLE_SHARING_KEY    = "geomesa.table.sharing"
+    val DEFAULT_DATE_KEY     = "geomesa.index.dtg"
+    val IGNORE_INDEX_DTG     = "geomesa.ignore.dtg"
+    val VIS_LEVEL_KEY        = "geomesa.visibility.level"
+    val Z3_INTERVAL_KEY      = "geomesa.z3.interval"
+    val XZ_PRECISION_KEY     = "geomesa.xz.precision"
+    val TABLE_SPLITTER       = "table.splitter.class" // note: doesn't start with geomesa so we don't persist it
+    val TABLE_SPLITTER_OPTS  = "table.splitter.options"
+    val MIXED_GEOMETRIES     = "geomesa.mixed.geometries"
+    val RESERVED_WORDS       = "override.reserved.words" // note: doesn't start with geomesa so we don't persist it
+    val DEFAULT_DTG_JOIN     = "override.index.dtg.join"
+    val KEYWORDS_KEY         = "geomesa.keywords"
+    val ENABLED_INDICES      = "geomesa.indices.enabled"
     // keep around old values for back compatibility
-    val ENABLED_INDEX_OPTS  = Seq(ENABLED_INDICES, "geomesa.indexes.enabled", "table.indexes.enabled")
-    val ST_INDEX_SCHEMA_KEY = "geomesa.index.st.schema"
-    val Z_SPLITS_KEY        = "geomesa.z.splits"
-    val ATTR_SPLITS_KEY     = "geomesa.attr.splits"
-    val LOGICAL_TIME_KEY    = "geomesa.logical.time"
+    val ENABLED_INDEX_OPTS   = Seq(ENABLED_INDICES, "geomesa.indexes.enabled", "table.indexes.enabled")
+    val ST_INDEX_SCHEMA_KEY  = "geomesa.index.st.schema"
+    val Z_SPLITS_KEY         = "geomesa.z.splits"
+    val ATTR_SPLITS_KEY      = "geomesa.attr.splits"
+    val ID_SPLITS_KEY        = "geomesa.id.splits"
+    val LOGICAL_TIME_KEY     = "geomesa.logical.time"
+    val COMPRESSION_ENABLED  = "geomesa.table.compression.enabled"
+    val COMPRESSION_TYPE     = "geomesa.table.compression.type"  // valid: snappy, lzo, gz(default), bzip2, lz4, zstd
+    val FID_UUID_KEY         = "geomesa.fid.uuid"
+    val FID_UUID_ENCODED_KEY = "geomesa.fid.uuid-encoded"
+    val TABLE_PARTITIONING   = "geomesa.table.partition"
   }
 
   private [geomesa] object InternalConfigs {
-    val GEOMESA_PREFIX      = "geomesa."
-    val SCHEMA_VERSION_KEY  = "geomesa.version"
-    val SHARING_PREFIX_KEY  = "geomesa.table.sharing.prefix"
-    val USER_DATA_PREFIX    = "geomesa.user-data.prefix"
-    val INDEX_VERSIONS      = "geomesa.indices"
-    val KEYWORDS_DELIMITER  = "\u0000"
+    val GEOMESA_PREFIX          = "geomesa."
+    val SHARING_PREFIX_KEY      = "geomesa.table.sharing.prefix"
+    val USER_DATA_PREFIX        = "geomesa.user-data.prefix"
+    val INDEX_VERSIONS          = "geomesa.indices"
+    val PARTITION_SPLITTER      = "geomesa.splitter.class"
+    val PARTITION_SPLITTER_OPTS = "geomesa.splitter.opts"
+    val REMOTE_VERSION          = "gm.remote.version" // note: doesn't start with geomesa so we don't persist it
+    val KEYWORDS_DELIMITER      = "\u0000"
   }
 
   object AttributeOptions {
@@ -63,9 +71,11 @@ object SimpleFeatureTypes {
     val OPT_INDEX        = "index"
     val OPT_STATS        = "keep-stats"
     val OPT_CARDINALITY  = "cardinality"
+    val OPT_COL_GROUPS   = "column-groups"
     val OPT_BIN_TRACK_ID = "bin-track-id"
     val OPT_CQ_INDEX     = "cq-index"
     val OPT_JSON         = "json"
+    val OPT_PRECISION    = "precision"
   }
 
   private [geomesa] object AttributeConfigs {
@@ -155,21 +165,24 @@ object SimpleFeatureTypes {
     * @return a string representing a serialization of the sft
     */
   def encodeType(sft: SimpleFeatureType, includeUserData: Boolean = false): String = {
-    import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
-
-    lazy val userData = {
-      val prefixes = sft.getUserDataPrefixes
-      sft.getUserData.filter { case (k, v) => v != null && prefixes.exists(k.toString.startsWith) }
-    }
-    val suffix = if (!includeUserData || userData.isEmpty) { "" } else {
-      userData.map { case (k, v) => s"$k='${StringEscapeUtils.escapeJava(v.toString)}'" }.mkString(";", ",", "")
-    }
-
-    sft.getAttributeDescriptors.map(encodeDescriptor(sft, _)).mkString("", ",", suffix)
+    val userData = if (includeUserData) { encodeUserData(sft) } else { "" }
+    sft.getAttributeDescriptors.map(encodeDescriptor(sft, _)).mkString("", ",", userData)
   }
 
   def encodeDescriptor(sft: SimpleFeatureType, descriptor: AttributeDescriptor): String =
     AttributeSpec(sft, descriptor).toSpec
+
+  def encodeUserData(sft: SimpleFeatureType): String = {
+    import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
+
+    val prefixes = sft.getUserDataPrefixes
+    val userData = sft.getUserData.filter { case (k, v) => v != null && prefixes.exists(k.toString.startsWith) }
+    if (userData.isEmpty) { "" } else {
+      userData.map { case (k, v) => encodeUserData(k, v) }.mkString(";", ",", "")
+    }
+  }
+
+  def encodeUserData(key: AnyRef, value: AnyRef): String = s"$key='${StringEscapeUtils.escapeJava(value.toString)}'"
 
   def toConfig(sft: SimpleFeatureType,
                includeUserData: Boolean = true,

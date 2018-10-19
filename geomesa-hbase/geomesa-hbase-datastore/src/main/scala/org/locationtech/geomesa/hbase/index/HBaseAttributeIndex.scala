@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -11,11 +11,11 @@ package org.locationtech.geomesa.hbase.index
 import org.apache.hadoop.hbase.client._
 import org.locationtech.geomesa.hbase.data._
 import org.locationtech.geomesa.hbase.index.HBaseIndexAdapter.ScanConfig
-import org.locationtech.geomesa.index.index.AttributeIndex
+import org.locationtech.geomesa.index.index.attribute.AttributeIndex
 
 case object HBaseAttributeIndex extends HBaseLikeAttributeIndex with HBasePlatform
 
 trait HBaseLikeAttributeIndex extends HBaseFeatureIndex with HBaseIndexAdapter
-    with AttributeIndex[HBaseDataStore, HBaseFeature, Mutation, Query, ScanConfig] {
-  override val version: Int = 4
+    with AttributeIndex[HBaseDataStore, HBaseFeature, Mutation, Scan, ScanConfig] {
+  override val version: Int = 5
 }

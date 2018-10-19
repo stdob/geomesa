@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -23,6 +23,7 @@ import org.specs2.runner.JUnitRunner
 
 @RunWith(classOf[JUnitRunner])
 class IteratorTriggerTest extends Specification {
+
   sequential
 
   object TestTable {
@@ -239,7 +240,7 @@ class IteratorTriggerTest extends Specification {
 
   "IteratorTrigger" should {
     "accept INCLUDE as a pass through filter" in {
-      IteratorTrigger.passThroughFilter(Filter.INCLUDE) mustEqual(true)
+      IteratorTrigger.passThroughFilter(Filter.INCLUDE) must beTrue
     }
 
     "determine overlap between transforms and filters" >> {
@@ -278,11 +279,10 @@ class IteratorTriggerTest extends Specification {
       }
 
       "for non-included geoms" >> {
-        // geom will always get added to the transforms
         val filter = "BBOX(geom, -180, -90, 180, 90) AND dtg = 2010-08-08T23:59:59Z"
         val attributes = Array("dtg")
         val result = testOverlap(filter, attributes)
-        result must beTrue
+        result must beFalse
       }
     }
   }

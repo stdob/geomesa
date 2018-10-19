@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -32,7 +32,10 @@ class TransformSimpleFeature(transformSchema: SimpleFeatureType,
 
   private lazy val geomIndex = transformSchema.indexOf(transformSchema.getGeometryDescriptor.getLocalName)
 
-  def setFeature(sf: SimpleFeature): Unit = underlying = sf
+  def setFeature(sf: SimpleFeature): TransformSimpleFeature = {
+    underlying = sf
+    this
+  }
 
   override def getAttribute(index: Int): AnyRef = attributes(index).apply(underlying)
 
@@ -78,18 +81,35 @@ class TransformSimpleFeature(transformSchema: SimpleFeatureType,
   override def getValue = throw new NotImplementedError
   override def getDescriptor = throw new NotImplementedError
 
-  override def setAttribute(name: Name, value: Object) = throw new NotImplementedError
-  override def setAttribute(name: String, value: Object) = throw new NotImplementedError
-  override def setAttribute(index: Int, value: Object) = throw new NotImplementedError
-  override def setAttributes(vals: jList[Object]) = throw new NotImplementedError
-  override def setAttributes(vals: Array[Object]) = throw new NotImplementedError
-  override def setDefaultGeometry(geo: Object) = throw new NotImplementedError
-  override def setDefaultGeometryProperty(geoAttr: GeometryAttribute) = throw new NotImplementedError
-  override def setValue(newValue: Object) = throw new NotImplementedError
-  override def setValue(values: jCollection[Property]) = throw new NotImplementedError
+  override def setAttribute(name: Name, value: Object): Unit = throw new NotImplementedError
+  override def setAttribute(name: String, value: Object): Unit = throw new NotImplementedError
+  override def setAttribute(index: Int, value: Object): Unit = throw new NotImplementedError
+  override def setAttributes(vals: jList[Object]): Unit = throw new NotImplementedError
+  override def setAttributes(vals: Array[Object]): Unit = throw new NotImplementedError
+  override def setDefaultGeometry(geo: Object): Unit = throw new NotImplementedError
+  override def setDefaultGeometryProperty(geoAttr: GeometryAttribute): Unit = throw new NotImplementedError
+  override def setValue(newValue: Object): Unit = throw new NotImplementedError
+  override def setValue(values: jCollection[Property]): Unit = throw new NotImplementedError
 
-  override def isNillable = true
-  override def validate() = throw new NotImplementedError
+  override def isNillable: Boolean = true
+  override def validate(): Unit = throw new NotImplementedError
+
+  override def hashCode: Int = getID.hashCode()
+
+  override def equals(obj: scala.Any): Boolean = obj match {
+    case other: SimpleFeature =>
+      getID == other.getID && getName == other.getName && getAttributeCount == other.getAttributeCount && {
+        var i = 0
+        while (i < getAttributeCount) {
+          if (getAttribute(i) != other.getAttribute(i)) {
+            return false
+          }
+          i += 1
+        }
+        true
+      }
+    case _ => false
+  }
 
   override def toString = s"TransformSimpleFeature:$getID"
 }

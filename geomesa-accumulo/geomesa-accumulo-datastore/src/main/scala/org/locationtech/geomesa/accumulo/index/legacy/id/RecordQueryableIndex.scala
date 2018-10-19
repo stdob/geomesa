@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -17,11 +17,14 @@ import org.locationtech.geomesa.accumulo.data.{AccumuloDataStore, AccumuloFeatur
 import org.locationtech.geomesa.accumulo.index._
 import org.locationtech.geomesa.accumulo.iterators._
 import org.locationtech.geomesa.filter._
+import org.locationtech.geomesa.index.conf.QueryProperties
+import org.locationtech.geomesa.index.iterators.StatsScan
 import org.locationtech.geomesa.index.strategies.IdFilterStrategy
-import org.locationtech.geomesa.index.utils.{Explainer, KryoLazyStatsUtils}
+import org.locationtech.geomesa.index.utils.Explainer
 import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 import org.locationtech.geomesa.utils.index.VisibilityLevel
 import org.opengis.feature.simple.SimpleFeatureType
+import org.opengis.filter.Filter
 
 trait RecordQueryableIndex extends AccumuloFeatureIndex
     with IdFilterStrategy[AccumuloDataStore, AccumuloFeature, Mutation]
@@ -36,11 +39,12 @@ trait RecordQueryableIndex extends AccumuloFeatureIndex
                             filter: AccumuloFilterStrategyType,
                             hints: Hints,
                             explain: Explainer): AccumuloQueryPlan = {
-    val prefix = sft.getTableSharingPrefix
+    val prefix = sft.getTableSharingBytes
 
     val ranges = filter.primary match {
       case None =>
-        // allow for full table scans
+        // check that full table scans are allowed
+        QueryProperties.BlockFullTableScans.onFullTableScan(sft.getTypeName, filter.filter.getOrElse(Filter.INCLUDE))
         filter.secondary.foreach { f =>
           logger.warn(s"Running full table scan for schema ${sft.getTypeName} with filter ${filterToString(f)}")
         }
@@ -52,11 +56,12 @@ trait RecordQueryableIndex extends AccumuloFeatureIndex
         // intersect together all groups of ID Filters, producing a set of IDs
         val identifiers = IdFilterStrategy.intersectIdFilters(primary)
         explain(s"Extracted ID filter: ${identifiers.mkString(", ")}")
-        identifiers.toSeq.map(id => aRange.exact(RecordIndex.getRowKey(prefix, id)))
+        val getRowKey = RecordIndex.getRowKey(sft)
+        identifiers.toSeq.map(id => aRange.exact(new Text(getRowKey(prefix, id))))
     }
 
     if (ranges.isEmpty) { EmptyPlan(filter) } else {
-      val table = getTableName(sft.getTypeName, ds)
+      val table = getTableNames(sft, ds, None)
       val threads = ds.config.recordThreads
       val dupes = false // record table never has duplicate entries
 
@@ -76,7 +81,7 @@ trait RecordQueryableIndex extends AccumuloFeatureIndex
         (Seq(iter), ArrowIterator.kvsToFeatures(), Some(reduce))
       } else if (hints.isStatsQuery) {
         val iter = KryoLazyStatsIterator.configure(sft, this, filter.secondary, hints, dupes)
-        val reduce = Some(KryoLazyStatsUtils.reduceFeatures(sft, hints)(_))
+        val reduce = Some(StatsScan.reduceFeatures(sft, hints)(_))
         (Seq(iter), KryoLazyStatsIterator.kvsToFeatures(), reduce)
       } else if (hints.isMapAggregatingQuery) {
         val iter = KryoLazyMapAggregatingIterator.configure(sft, this, filter.secondary, hints, dupes)

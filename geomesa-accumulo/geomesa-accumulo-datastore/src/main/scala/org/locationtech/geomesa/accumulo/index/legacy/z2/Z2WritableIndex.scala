@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -17,24 +17,20 @@ import org.apache.accumulo.core.conf.Property
 import org.apache.hadoop.io.Text
 import org.locationtech.geomesa.accumulo.AccumuloVersion
 import org.locationtech.geomesa.accumulo.data._
-import org.locationtech.geomesa.accumulo.index.AccumuloFeatureIndex
-import org.locationtech.geomesa.curve.NormalizedDimension.SemiNormalizedDimension
-import org.locationtech.geomesa.curve.{LegacyZ2SFC, NormalizedDimension}
+import org.locationtech.geomesa.accumulo.index.{AccumuloColumnGroups, AccumuloFeatureIndex}
+import org.locationtech.geomesa.curve.LegacyZ2SFC
 import org.locationtech.geomesa.index.utils.SplitArrays
 import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
-import org.locationtech.sfcurve.zorder.Z2
-import org.opengis.feature.simple.SimpleFeatureType
-
-import scala.util.control.NonFatal
+import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 
 trait Z2WritableIndex extends AccumuloFeatureIndex {
 
-  import AccumuloFeatureIndex.{BinColumnFamily, FullColumnFamily}
+  import AccumuloColumnGroups.BinColumnFamily
   import org.locationtech.geomesa.accumulo.index.legacy.z2.Z2IndexV1._
 
-  override def getIdFromRow(sft: SimpleFeatureType): (Array[Byte], Int, Int) => String = {
+  override def getIdFromRow(sft: SimpleFeatureType): (Array[Byte], Int, Int, SimpleFeature) => String = {
     val start = getIdRowOffset(sft)
-    (row, offset, length) => new String(row, offset + start, length - start, StandardCharsets.UTF_8)
+    (row, offset, length, feature) => new String(row, offset + start, length - start, StandardCharsets.UTF_8)
   }
 
   // split(1 byte), z value (8 bytes), id (n bytes)
@@ -115,15 +111,14 @@ trait Z2WritableIndex extends AccumuloFeatureIndex {
     prefix + length
   }
 
-  override def configure(sft: SimpleFeatureType, ds: AccumuloDataStore): Unit = {
+  override def configure(sft: SimpleFeatureType, ds: AccumuloDataStore, partition: Option[String]): String = {
     import scala.collection.JavaConversions._
 
-    super.configure(sft, ds)
-    val table = getTableName(sft.getTypeName, ds)
+    val table = super.configure(sft, ds, partition)
 
     AccumuloVersion.ensureTableExists(ds.connector, table)
 
-    val localityGroups = Seq(BinColumnFamily, FullColumnFamily).map(cf => (cf.toString, ImmutableSet.of(cf))).toMap
+    val localityGroups = Seq(BinColumnFamily, AccumuloColumnGroups.default).map(cf => (cf.toString, ImmutableSet.of(cf))).toMap
     ds.tableOps.setLocalityGroups(table, localityGroups)
 
     // drop first split, otherwise we get an empty tablet
@@ -140,5 +135,7 @@ trait Z2WritableIndex extends AccumuloFeatureIndex {
     }
 
     ds.tableOps.setProperty(table, Property.TABLE_BLOCKCACHE_ENABLED.getKey, "true")
+
+    table
   }
 }

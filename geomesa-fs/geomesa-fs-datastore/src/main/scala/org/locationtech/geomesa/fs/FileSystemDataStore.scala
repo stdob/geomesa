@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,98 +8,76 @@
 
 package org.locationtech.geomesa.fs
 
-import java.awt.RenderingHints
-import java.util.ServiceLoader
-import java.{io, util}
-
+import com.typesafe.scalalogging.LazyLogging
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{FileSystem, Path}
+import org.apache.hadoop.fs.{FileContext, Path}
+import org.geotools.data.Query
 import org.geotools.data.store.{ContentDataStore, ContentEntry, ContentFeatureSource}
-import org.geotools.data.{DataAccessFactory, DataStore, DataStoreFactorySpi, Query}
 import org.geotools.feature.NameImpl
-import org.locationtech.geomesa.fs.storage.api.{FileSystemStorage, FileSystemStorageFactory}
-import org.locationtech.geomesa.fs.storage.common.PartitionScheme
-import org.locationtech.geomesa.index.geotools.GeoMesaDataStoreFactory.NamespaceParams
-import org.locationtech.geomesa.utils.geotools.GeoMesaParam
+import org.locationtech.geomesa.fs.storage.api.FileSystemStorage
+import org.locationtech.geomesa.fs.storage.common.{Encodings, FileSystemStorageFactory}
+import org.locationtech.geomesa.index.metadata.{GeoMesaMetadata, HasGeoMesaMetadata, NoOpMetadata}
+import org.locationtech.geomesa.index.stats.{GeoMesaStats, HasGeoMesaStats, UnoptimizedRunnableStats}
+import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes
+import org.locationtech.geomesa.utils.index.GeoMesaSchemaValidator
 import org.opengis.feature.`type`.Name
 import org.opengis.feature.simple.SimpleFeatureType
 
-import scala.collection.JavaConverters._
+import scala.concurrent.duration.Duration
 
-class FileSystemDataStore(fs: FileSystem,
-                          val root: Path,
-                          val storage: FileSystemStorage,
+class FileSystemDataStore(fc: FileContext,
+                          conf: Configuration,
+                          root: Path,
                           readThreads: Int,
-                          conf: Configuration) extends ContentDataStore {
-  import scala.collection.JavaConversions._
+                          writeTimeout: Duration,
+                          defaultEncoding: Option[String])
+    extends ContentDataStore with HasGeoMesaStats with HasGeoMesaMetadata[String] with LazyLogging {
 
-  override def createTypeNames(): util.List[Name] = {
-    storage.listFeatureTypes().map(name => new NameImpl(getNamespaceURI, name.getTypeName) : Name).asJava
-  }
+  private val manager = FileSystemStorageManager(fc, conf, root)
 
-  override def createFeatureSource(entry: ContentEntry): ContentFeatureSource = {
-    storage.listFeatureTypes().find { f => f.getTypeName.equals(entry.getTypeName) }
-      .getOrElse(throw new RuntimeException(s"Could not find feature type ${entry.getTypeName}"))
-    new FileSystemFeatureStore(entry, Query.ALL, fs, storage, readThreads)
+  override val metadata: GeoMesaMetadata[String] = new NoOpMetadata[String]
+  override val stats: GeoMesaStats = new UnoptimizedRunnableStats(this)
+
+  override def createTypeNames(): java.util.List[Name] = {
+    val names = new java.util.ArrayList[Name]()
+    manager.storages().foreach { storage =>
+      names.add(new NameImpl(getNamespaceURI, storage.getMetadata.getSchema.getTypeName))
+    }
+    names
   }
 
   override def createSchema(sft: SimpleFeatureType): Unit = {
-    storage.createNewFeatureType(sft, PartitionScheme.extractFromSft(sft))
-  }
-}
+    manager.storage(sft.getTypeName) match {
+      case Some(s) =>
+        logger.warn("Schema already exists: " +
+          SimpleFeatureTypes.encodeType(s.getMetadata.getSchema, includeUserData = true))
 
-class FileSystemDataStoreFactory extends DataStoreFactorySpi {
-  import FileSystemDataStoreParams._
-  private val storageFactory = ServiceLoader.load(classOf[FileSystemStorageFactory])
-
-  override def createDataStore(params: util.Map[String, io.Serializable]): DataStore = {
-    import org.locationtech.geomesa.utils.conversions.ScalaImplicits.RichIterator
-
-    import scala.collection.JavaConversions._
-
-    val path = new Path(PathParam.lookup(params))
-    val encoding = EncodingParam.lookup(params)
-
-    val conf = new Configuration()
-    val storage = storageFactory.iterator().filter(_.canProcess(params)).map(_.build(params)).headOption.getOrElse {
-      throw new IllegalArgumentException("Can't create storage factory with the provided params")
+      case None =>
+        GeoMesaSchemaValidator.validate(sft)
+        val encoding = Encodings.getEncoding(sft).getOrElse {
+          val enc = this.defaultEncoding.getOrElse {
+            throw new IllegalArgumentException("Encoding type must be specified in either " +
+                "the SimpleFeatureType user data or the data store parameters")
+          }
+          Encodings.setEncoding(sft, enc)
+          enc
+        }
+        val path = manager.defaultPath(sft.getTypeName)
+        val storage = FileSystemStorageFactory.factory(encoding).create(fc, conf, path, sft)
+        manager.register(path, storage)
     }
-    val fs = path.getFileSystem(conf)
-
-    val readThreads = ReadThreadsParam.lookup(params)
-
-    val ds = new FileSystemDataStore(fs, path, storage, readThreads, conf)
-    NamespaceParam.lookupOpt(params).foreach(ds.setNamespaceURI)
-    ds
   }
 
-  override def createNewDataStore(params: util.Map[String, io.Serializable]): DataStore =
-    createDataStore(params)
+  override def createFeatureSource(entry: ContentEntry): ContentFeatureSource =
+    new FileSystemFeatureStore(storage(entry.getTypeName), entry, Query.ALL, readThreads, writeTimeout)
 
-  override def isAvailable: Boolean = true
-
-  override def canProcess(params: util.Map[String, io.Serializable]): Boolean =
-    PathParam.exists(params) && EncodingParam.exists(params)
-
-  override def getParametersInfo: Array[DataAccessFactory.Param] =
-    Array(PathParam, EncodingParam, NamespaceParam)
-
-  override def getDisplayName: String = "File System (GeoMesa)"
-
-  override def getDescription: String = "File System Based Data Store"
-
-  override def getImplementationHints: util.Map[RenderingHints.Key, _] =
-    new util.HashMap[RenderingHints.Key, Serializable]()
-}
-
-object FileSystemDataStoreParams extends NamespaceParams {
-  val PathParam            = new GeoMesaParam[String]("fs.path", "Root of the filesystem hierarchy", optional = false)
-  val EncodingParam        = new GeoMesaParam[String]("fs.encoding", "Encoding of data", optional = false)
-
-  val ConverterNameParam   = new GeoMesaParam[String]("fs.options.converter.name", "Converter Name")
-  val ConverterConfigParam = new GeoMesaParam[String]("fs.options.converter.conf", "Converter Typesafe Config", largeText = true)
-  val SftNameParam         = new GeoMesaParam[String]("fs.options.sft.name", "SimpleFeatureType Name")
-  val SftConfigParam       = new GeoMesaParam[String]("fs.options.sft.conf", "SimpleFeatureType Typesafe Config", largeText = true)
-
-  val ReadThreadsParam     = new GeoMesaParam[Integer]("fs.read-threads", "Read Threads", default = 4)
+  /**
+    * Get a handle on the underlying storage instance for a given simple feature type
+    *
+    * @param typeName simple feature type name
+    * @return
+    */
+  def storage(typeName: String): FileSystemStorage = manager.storage(typeName).getOrElse {
+    throw new IllegalArgumentException(s"Schema '$typeName' doesn't exist or could not be loaded")
+  }
 }

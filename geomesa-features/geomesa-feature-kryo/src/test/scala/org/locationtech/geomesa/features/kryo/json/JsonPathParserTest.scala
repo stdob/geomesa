@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -20,11 +20,19 @@ class JsonPathParserTest extends Specification {
   "JsonPathParser" should {
     "not parse invalid paths" in {
       JsonPathParser.parse("$.$") must throwA[ParsingException]
+      JsonPathParser.parse("$.foo foo") must throwA[ParsingException]
     }
     "correctly parse attribute paths" in {
       val path = JsonPathParser.parse("$.foo")
       path must haveLength(1)
       path.head mustEqual PathAttribute("foo")
+    }
+    "correctly parse attribute bracket paths" in {
+      JsonPathParser.parse("$[foo]") mustEqual Seq(PathAttribute("foo", bracketed = true))
+      JsonPathParser.parse("$[foo_bar]") mustEqual Seq(PathAttribute("foo_bar", bracketed = true))
+      JsonPathParser.parse("$['foo']") mustEqual Seq(PathAttribute("foo", bracketed = true))
+      JsonPathParser.parse("$['foo_bar']") mustEqual Seq(PathAttribute("foo_bar", bracketed = true))
+      JsonPathParser.parse("$['foo-bar 0']") mustEqual Seq(PathAttribute("foo-bar 0", bracketed = true))
     }
     "correctly parse array index paths" in {
       val path = JsonPathParser.parse("$.foo[2]")

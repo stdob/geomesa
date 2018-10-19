@@ -54,7 +54,7 @@ and then include the desired ``geomesa-*`` dependencies:
     <dependency>
       <groupId>org.locationtech.geomesa</groupId>
       <artifactId>geomesa-utils_2.11</artifactId>
-      <version>1.3.4</version>
+      <version>2.0.0-m.1</version>
     </dependency>
 
 Snapshot artifacts are available in the LocationTech snapshots repository:
@@ -80,7 +80,7 @@ To build and install the source distribution requires:
 * `Java JDK 8 <http://www.oracle.com/technetwork/java/javase/downloads/index.html>`__
 * `Apache Maven <http://maven.apache.org/>`__ |maven_version|
 
-Source can be cloned using `Git <http://git-scm.com/>`__ or downloaded from `GitHub`__
+Source can be cloned using `Git <http://git-scm.com/>`__ or downloaded from `GitHub`__.
 
 __ https://github.com/locationtech/geomesa/archive/master.tar.gz
 

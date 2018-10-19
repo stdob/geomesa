@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -49,7 +49,7 @@ object SimpleFeatureSpecParser {
         if (matchers.isEmpty) {
           s"Invalid spec string at index ${e.getStartIndex}."
         } else {
-          val expected = if (matchers.length > 1) { s"one of: ${matchers.mkString(", ")}" } else { matchers.head }
+          val expected = if (matchers.lengthCompare(1) > 0) { s"one of: ${matchers.mkString(", ")}" } else { matchers.head }
           s"Invalid spec string at index ${e.getStartIndex}. Expected $expected."
         }
       }.getOrElse(fallback)
@@ -98,7 +98,7 @@ private class SimpleFeatureSpecParser extends BasicParser {
 
   // full simple feature spec
   def spec: Rule1[SimpleFeatureSpec] = rule("Specification") {
-    (oneOrMore(attribute, ",") ~ sftOptions) ~ EOI ~~> {
+    (zeroOrMore(attribute, ",") ~ sftOptions) ~ EOI ~~> {
       (attributes, sftOpts) => SimpleFeatureSpec(attributes, sftOpts)
     }
   }
@@ -175,7 +175,7 @@ private class SimpleFeatureSpecParser extends BasicParser {
 
   // single attribute option
   private def attributeOption: Rule2[String, String] = rule("AttributeOption") {
-    oneOrMore(char | anyOf(".-")) ~> { s => s } ~ "=" ~ oneOrMore(noneOf(":,;")) ~> { s => s }
+    oneOrMore(char | anyOf(".-")) ~> { s => s } ~ "=" ~ (quotedString | singleQuotedString | unquotedString)
   }
 
   // options for the simple feature type
@@ -185,7 +185,7 @@ private class SimpleFeatureSpecParser extends BasicParser {
 
   // single sft option
   private def sftOption: Rule1[(String, String)] = rule("FeatureTypeOption") {
-    (oneOrMore(char | ".") ~> { s => s } ~ "=" ~ sftOptionValue) ~~> { (k, v) => (k, v) }
+    (oneOrMore(char | anyOf(".-")) ~> { s => s } ~ "=" ~ sftOptionValue) ~~> { (k, v) => (k, v) }
   }
 
   // value for an sft option

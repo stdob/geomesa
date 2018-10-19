@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -11,6 +11,7 @@ package org.locationtech.geomesa.accumulo.index.legacy.attribute
 import com.typesafe.scalalogging.LazyLogging
 import org.apache.accumulo.core.client.IteratorSetting
 import org.apache.accumulo.core.data.{Range => AccRange}
+import org.apache.hadoop.io.Text
 import org.geotools.data.DataUtilities
 import org.geotools.factory.Hints
 import org.locationtech.geomesa.accumulo.AccumuloFilterStrategyType
@@ -23,8 +24,9 @@ import org.locationtech.geomesa.features.SerializationType
 import org.locationtech.geomesa.filter._
 import org.locationtech.geomesa.filter.visitor.FilterExtractingVisitor
 import org.locationtech.geomesa.index.api.FilterStrategy
+import org.locationtech.geomesa.index.iterators.StatsScan
 import org.locationtech.geomesa.index.stats.GeoMesaStats
-import org.locationtech.geomesa.index.utils.{Explainer, KryoLazyStatsUtils}
+import org.locationtech.geomesa.index.utils.Explainer
 import org.locationtech.geomesa.utils.geotools.RichAttributeDescriptors.RichAttributeDescriptor
 import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 import org.locationtech.geomesa.utils.index.{IndexMode, VisibilityLevel}
@@ -64,8 +66,8 @@ trait AttributeQueryableIndex extends AccumuloFeatureIndex with LazyLogging {
     }
 
     lazy val dates = intervals.map { i =>
-      (i.values.map(_.lower.value.map(_.getMillis).getOrElse(0L)).min,
-          i.values.map(_.upper.value.map(_.getMillis).getOrElse(Long.MaxValue)).max)
+      (i.values.map(_.lower.value.map(_.toInstant.toEpochMilli).getOrElse(0L)).min,
+          i.values.map(_.upper.value.map(_.toInstant.toEpochMilli).getOrElse(Long.MaxValue)).max)
     }
     // TODO GEOMESA-1336 fix exclusive AND handling for list types
     lazy val bounds = AttributeQueryableIndex.getBounds(sft, primary, dates)
@@ -93,7 +95,7 @@ trait AttributeQueryableIndex extends AccumuloFeatureIndex with LazyLogging {
     val sampling = hints.getSampling
     val hasDupes = descriptor.isMultiValued
 
-    val attrTable = getTableName(sft.getTypeName, ds)
+    val attrTable = getTableNames(sft, ds, None)
     val attrThreads = ds.config.queryThreads
 
     def visibilityIter(schema: SimpleFeatureType): Seq[IteratorSetting] = sft.getVisibilityLevel match {
@@ -164,7 +166,7 @@ trait AttributeQueryableIndex extends AccumuloFeatureIndex with LazyLogging {
       if (descriptor.getIndexCoverage() == IndexCoverage.FULL) {
         val iter = KryoLazyStatsIterator.configure(sft, this, filter.secondary, hints, hasDupes)
         val iters = visibilityIter(sft) :+ iter
-        val reduce = Some(KryoLazyStatsUtils.reduceFeatures(sft, hints)(_))
+        val reduce = Some(StatsScan.reduceFeatures(sft, hints)(_))
         BatchScanPlan(filter, attrTable, ranges, iters, Seq.empty, kvsToFeatures, reduce, attrThreads, hasDuplicates = false)
       } else {
         // check to see if we can execute against the index values
@@ -224,8 +226,11 @@ trait AttributeQueryableIndex extends AccumuloFeatureIndex with LazyLogging {
     val attributeScan = attributePlan(IndexValueEncoder.getIndexSft(sft), stFilter, None)
 
     // apply any secondary filters or transforms against the record table
-    val recordIndex = AccumuloFeatureIndex.indices(sft, IndexMode.Read).find(_.name == RecordIndex.name).getOrElse {
-      throw new RuntimeException("Record index does not exist for join query")
+    val recordIndex = {
+      val indices = AccumuloFeatureIndex.indices(sft, mode = IndexMode.Read)
+      indices.find(AccumuloFeatureIndex.RecordIndices.contains).getOrElse {
+        throw new RuntimeException("Record index does not exist for join query")
+      }
     }
     val (recordIter, kvsToFeatures, reduce) = if (hints.isArrowQuery) {
       val (iter, reduce) = ArrowIterator.configure(sft, recordIndex, ds.stats, filter.filter, ecqlFilter, hints, deduplicate = false)
@@ -234,7 +239,7 @@ trait AttributeQueryableIndex extends AccumuloFeatureIndex with LazyLogging {
     } else if (hints.isStatsQuery) {
       val iter = Seq(KryoLazyStatsIterator.configure(sft, recordIndex, ecqlFilter, hints, deduplicate = false))
       val kvs = KryoLazyStatsIterator.kvsToFeatures()
-      val reduce = Some(KryoLazyStatsUtils.reduceFeatures(sft, hints)(_))
+      val reduce = Some(StatsScan.reduceFeatures(sft, hints)(_))
       (iter, kvs, reduce)
     } else if (hints.isBinQuery) {
       // TODO GEOMESA-822 we can use the aggregating iterator if the features are kryo encoded
@@ -254,20 +259,21 @@ trait AttributeQueryableIndex extends AccumuloFeatureIndex with LazyLogging {
 
     // function to join the attribute index scan results to the record table
     // have to pull the feature id from the row
-    val prefix = sft.getTableSharingPrefix
+    val prefix = sft.getTableSharingBytes
     val getId = getIdFromRow(sft)
+    val getRowKey = RecordIndex.getRowKey(sft)
     val joinFunction: JoinFunction = (kv) => {
       val row = kv.getKey.getRow
-      new AccRange(RecordIndex.getRowKey(prefix, getId(row.getBytes, 0, row.getLength)))
+      new AccRange(new Text(getRowKey(prefix, getId(row.getBytes, 0, row.getLength, null))))
     }
 
-    val recordTable = recordIndex.getTableName(sft.getTypeName, ds)
+    val recordTable = recordIndex.getTableNames(sft, ds, None)
     val recordThreads = ds.config.recordThreads
     val recordRanges = Seq(new AccRange()) // this will get overwritten in the join method
     val joinQuery = BatchScanPlan(filter, recordTable, recordRanges, recordIterators, Seq.empty,
       kvsToFeatures, reduce, recordThreads, hasDupes)
 
-    JoinPlan(filter, attributeScan.table, attributeScan.ranges, attributeScan.iterators,
+    JoinPlan(filter, attributeScan.tables, attributeScan.ranges, attributeScan.iterators,
       attributeScan.columnFamilies, recordThreads, hasDupes, joinFunction, joinQuery)
   }
 

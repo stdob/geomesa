@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -69,6 +69,16 @@ trait GeoMesaMetadata[T] extends Closeable {
     read(typeName, key).getOrElse {
       throw new RuntimeException(s"Unable to find required metadata property for $typeName:$key")
     }
+
+  /**
+    * Scan for keys starting with a given prefix
+    *
+    * @param typeName simple feature type name
+    * @param prefix key prefix
+    * @param cache may return a cached value if true, otherwise may use a slower lookup
+    * @return keys -> values
+    */
+  def scan(typeName: String, prefix: String, cache: Boolean = true): Seq[(String, T)]
 
   /**
     * Invalidates any cached value for the given key

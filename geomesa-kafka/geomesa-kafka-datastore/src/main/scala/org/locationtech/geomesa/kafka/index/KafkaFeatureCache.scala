@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -9,14 +9,18 @@
 package org.locationtech.geomesa.kafka.index
 
 import java.io.Closeable
-import java.util.concurrent.{Executors, TimeUnit}
+import java.util.concurrent._
 
-import com.github.benmanes.caffeine.cache._
 import com.typesafe.scalalogging.LazyLogging
-import org.opengis.feature.simple.SimpleFeature
+import org.locationtech.geomesa.filter.factory.FastFilterFactory
+import org.locationtech.geomesa.filter.index.SpatialIndexSupport
+import org.locationtech.geomesa.kafka.data.KafkaDataStore
+import org.locationtech.geomesa.kafka.data.KafkaDataStore.{EventTimeConfig, IndexConfig}
+import org.locationtech.geomesa.memory.cqengine.GeoCQIndexSupport
+import org.locationtech.geomesa.memory.cqengine.utils.CQIndexType
+import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 import org.opengis.filter.Filter
-
-import scala.concurrent.duration.Duration
+import org.opengis.filter.expression.Expression
 
 trait KafkaFeatureCache extends Closeable {
   def put(feature: SimpleFeature): Unit
@@ -26,147 +30,132 @@ trait KafkaFeatureCache extends Closeable {
   def size(filter: Filter): Int
   def query(id: String): Option[SimpleFeature]
   def query(filter: Filter): Iterator[SimpleFeature]
-  def cleanUp(): Unit
 }
 
-object KafkaFeatureCache {
+object KafkaFeatureCache extends LazyLogging {
 
+  import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
+
+  /**
+    * Create a standard feature cache
+    *
+    * @param sft simple feature type
+    * @param config cache config
+    * @return
+    */
+  def apply(sft: SimpleFeatureType, config: IndexConfig): KafkaFeatureCache = new KafkaFeatureCacheImpl(sft, config)
+
+  /**
+    * No-op cache
+    *
+    * @return
+    */
   def empty(): KafkaFeatureCache = EmptyFeatureCache
 
-  abstract class AbstractKafkaFeatureCache[T <: AnyRef](expiry: Duration,
-                                                        cleanup: Duration,
-                                                        consistency: Duration)
-                                                       (implicit ticker: Ticker)
-      extends KafkaFeatureCache with LazyLogging {
-
-    protected val cache: Cache[String, T] = {
-      val builder = Caffeine.newBuilder().ticker(ticker)
-      if (expiry != Duration.Inf) {
-        val listener = new RemovalListener[String, T] {
-          override def onRemoval(key: String, value: T, cause: RemovalCause): Unit = {
-            if (cause != RemovalCause.REPLACED) {
-              logger.debug(s"Removing feature $key due to ${cause.name()} after $expiry")
-              removeFromIndex(value)
-            }
-          }
-        }
-        builder.expireAfterWrite(expiry.toMillis, TimeUnit.MILLISECONDS).removalListener(listener)
-      }
-      builder.build[String, T]()
+  /**
+    * Cache that won't spatially index the features
+    *
+    * @param sft simple feature type
+    * @param eventTime event time config
+    * @return
+    */
+  def nonIndexing(sft: SimpleFeatureType, eventTime: Option[EventTimeConfig] = None): KafkaFeatureCache = {
+    eventTime.collect { case e if e.ordering => FastFilterFactory.toExpression(sft, e.expression) } match {
+      case None => new NonIndexingFeatureCache()
+      case Some(exp) => new NonIndexingEventTimeFeatureCache(exp)
     }
+  }
 
-    private val executor = {
-      val cleaner = if (expiry == Duration.Inf || cleanup == Duration.Inf) { None } else {
-        Some(new Runnable() { override def run(): Unit = cache.cleanUp() })
-      }
-      val checker = if (consistency == Duration.Inf) { None } else {
-        var lastRun = Set.empty[SimpleFeature]
+  /**
+    * Create a CQEngine index support. Note that CQEngine handles points vs non-points internally
+    *
+    * @param sft simple feature type
+    * @param config index config
+    * @return
+    */
+  private [index] def cqIndexSupport(sft: SimpleFeatureType, config: IndexConfig): SpatialIndexSupport = {
+    val attributes = if (config.cqAttributes == Seq(KafkaDataStore.CqIndexFlag)) {
+      // deprecated boolean config to enable indices based on the stored simple feature type
+      CQIndexType.getDefinedAttributes(sft) ++ Option(sft.getGeomField).map((_, CQIndexType.GEOMETRY))
+    } else {
+      config.cqAttributes
+    }
+    GeoCQIndexSupport(sft, attributes, config.resolutionX, config.resolutionY)
+  }
 
-        Some(new Runnable() {
-          override def run(): Unit = {
-            // only remove features that have been found to be inconsistent on the last run just to make sure
-            lastRun = inconsistencies().filter { sf =>
-              if (lastRun.contains(sf)) {
-                cache.invalidate(sf.getID)
-                removeFromIndex(wrap(sf))
-                false
-              } else {
-                true // we'll check it again next time
-              }
-            }
-          }
-        })
-      }
+  /**
+    * Non-indexing feature cache that just tracks the most recent feature
+    */
+  class NonIndexingFeatureCache extends KafkaFeatureCache {
 
-      val count = cleaner.map(_ => 1).getOrElse(0) + checker.map(_ => 1).getOrElse(0)
-      if (count == 0) { None } else {
-        val executor = Executors.newScheduledThreadPool(count)
-        cleaner.foreach(executor.scheduleAtFixedRate(_, cleanup.toMillis, cleanup.toMillis, TimeUnit.MILLISECONDS))
-        checker.foreach(executor.scheduleAtFixedRate(_, consistency.toMillis, consistency.toMillis, TimeUnit.MILLISECONDS))
-        Some(executor)
+    private val state = new ConcurrentHashMap[String, SimpleFeature]
+
+    override def put(feature: SimpleFeature): Unit = state.put(feature.getID, feature)
+
+    override def remove(id: String): Unit = state.remove(id)
+
+    override def clear(): Unit = state.clear()
+
+    override def close(): Unit = {}
+
+    override def size(): Int = state.size()
+
+    override def size(filter: Filter): Int = query(filter).length
+
+    override def query(id: String): Option[SimpleFeature] = Option(state.get(id))
+
+    override def query(filter: Filter): Iterator[SimpleFeature] = {
+      import scala.collection.JavaConverters._
+      val features = state.asScala.valuesIterator
+      if (filter == Filter.INCLUDE) { features } else {
+        features.filter(filter.evaluate)
       }
     }
+  }
+
+  /**
+    * Non-indexing feature cache that just tracks the most recent feature, based on event time
+    *
+    * @param time event time expression
+    */
+  class NonIndexingEventTimeFeatureCache(time: Expression) extends KafkaFeatureCache {
+
+    private val state = new ConcurrentHashMap[String, (SimpleFeature, Long)]
 
     /**
-      * WARNING: this method is not thread-safe
+      * Note: this method is not thread-safe. The `state` and can fail to replace the correct values
+      * if the same feature is updated simultaneously from two different threads
       *
-      * TODO: https://geomesa.atlassian.net/browse/GEOMESA-1409
+      * In our usage, this isn't a problem, as a given feature ID is always operated on by a single thread
+      * due to kafka consumer partitioning
       */
     override def put(feature: SimpleFeature): Unit = {
-      val id = feature.getID
-      val old = cache.getIfPresent(id)
-      if (old != null) {
-        removeFromIndex(old)
-      }
-      val wrapped = wrap(feature)
-      cache.put(id, wrapped)
-      addToIndex(wrapped)
-    }
-
-    /**
-      * WARNING: this method is not thread-safe
-      *
-      * TODO: https://geomesa.atlassian.net/browse/GEOMESA-1409
-      */
-    override def remove(id: String): Unit = {
-      val old = cache.getIfPresent(id)
-      if (old != null) {
-        cache.invalidate(id)
-        removeFromIndex(old)
+      val tuple = (feature, FeatureStateFactory.time(time, feature))
+      val old = state.put(feature.getID, tuple)
+      if (old != null && old._2 > tuple._2) {
+        state.replace(feature.getID, tuple, old)
       }
     }
 
-    override def clear(): Unit = {
-      cache.invalidateAll()
-      clearIndex()
-    }
+    override def remove(id: String): Unit = state.remove(id)
 
-    override def size(): Int = cache.estimatedSize().toInt
+    override def clear(): Unit = state.clear()
 
-    // optimized for filter.include
-    override def size(f: Filter): Int = {
-      if (f == Filter.INCLUDE) { size() } else {
-        query(f).length
+    override def close(): Unit = {}
+
+    override def size(): Int = state.size()
+
+    override def size(filter: Filter): Int = query(filter).length
+
+    override def query(id: String): Option[SimpleFeature] = Option(state.get(id)).map(_._1)
+
+    override def query(filter: Filter): Iterator[SimpleFeature] = {
+      import scala.collection.JavaConverters._
+      val features = state.asScala.valuesIterator.map(_._1)
+      if (filter == Filter.INCLUDE) { features } else {
+        features.filter(filter.evaluate)
       }
     }
-
-    override def cleanUp(): Unit = cache.cleanUp()
-
-    override def close(): Unit = executor.foreach(_.shutdown())
-
-    /**
-      * Create the cache value from a simple feature
-      *
-      * @param feature simple feature
-      * @return
-      */
-    protected def wrap(feature: SimpleFeature): T
-
-    /**
-      * Add a feature to any indices
-      *
-      * @param value value to add
-      */
-    protected def addToIndex(value: T): Unit
-
-    /**
-      * Remove a feature from any indices
-      *
-      * @param value value to remove
-      */
-    protected def removeFromIndex(value: T): Unit
-
-    /**
-      * Clear all features from any indices
-      */
-    protected def clearIndex(): Unit
-
-    /**
-      * Check for inconsistencies between the main cache and the spatial index
-      *
-      * @return any inconsistent features (i.e. in one but not both indices)
-      */
-    protected def inconsistencies(): Set[SimpleFeature]
   }
 
   object EmptyFeatureCache extends KafkaFeatureCache {
@@ -177,7 +166,6 @@ object KafkaFeatureCache {
     override def size(filter: Filter): Int = 0
     override def query(id: String): Option[SimpleFeature] = None
     override def query(filter: Filter): Iterator[SimpleFeature] = Iterator.empty
-    override def cleanUp(): Unit = {}
     override def close(): Unit = {}
   }
 }

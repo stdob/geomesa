@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -14,10 +14,7 @@ import com.google.common.primitives.{Longs, Shorts}
 import org.locationtech.geomesa.index.index.z3.Z3IndexValues
 import org.locationtech.sfcurve.zorder.Z3
 
-class Z3Filter(val xy: Array[Array[Int]],
-               val t: Array[Array[Array[Int]]],
-               val minEpoch: Short,
-               val maxEpoch: Short) extends java.io.Serializable {
+class Z3Filter(val xy: Array[Array[Int]], val t: Array[Array[Array[Int]]], val minEpoch: Short, val maxEpoch: Short) {
 
   def inBounds(buf: Array[Byte], offset: Int): Boolean = {
     val keyZ = Z3Filter.rowToZ(buf, offset)
@@ -176,9 +173,9 @@ object Z3Filter {
   }
 
   // account for epoch - first 2 bytes
-  private def rowToZ(b: Array[Byte], i: Int): Long =
+  def rowToZ(b: Array[Byte], i: Int): Long =
     Longs.fromBytes(b(i + 2), b(i + 3), b(i + 4), b(i + 5), b(i + 6), b(i + 7), b(i + 8), b(i + 9))
 
-  private def rowToEpoch(bytes: Array[Byte], offset: Int): Short =
+  def rowToEpoch(bytes: Array[Byte], offset: Int): Short =
     Shorts.fromBytes(bytes(offset), bytes(offset + 1))
 }

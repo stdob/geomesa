@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -13,11 +13,13 @@ import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
 
 import org.apache.accumulo.core.client._
 import org.apache.accumulo.core.client.admin.TableOperations
+import org.apache.accumulo.core.iterators.SortedKeyValueIterator
 import org.apache.accumulo.core.security.Authorizations
 import org.apache.hadoop.security.UserGroupInformation
 import org.geotools.data.Query
 import org.locationtech.geomesa.accumulo._
 import org.locationtech.geomesa.accumulo.audit.AccumuloAuditService
+import org.locationtech.geomesa.accumulo.data.AccumuloFeatureWriter.AccumuloFeatureWriterFactory
 import org.locationtech.geomesa.accumulo.data.stats._
 import org.locationtech.geomesa.accumulo.index.AccumuloAttributeIndex.AttributeSplittable
 import org.locationtech.geomesa.accumulo.index._
@@ -25,6 +27,7 @@ import org.locationtech.geomesa.accumulo.iterators.ProjectVersionIterator
 import org.locationtech.geomesa.accumulo.security.AccumuloAuthsProvider
 import org.locationtech.geomesa.accumulo.util.ZookeeperLocking
 import org.locationtech.geomesa.index.api.GeoMesaFeatureIndex
+import org.locationtech.geomesa.index.conf.partition.TablePartition
 import org.locationtech.geomesa.index.geotools.GeoMesaDataStoreFactory.GeoMesaDataStoreConfig
 import org.locationtech.geomesa.index.geotools.{GeoMesaFeatureCollection, GeoMesaFeatureSource}
 import org.locationtech.geomesa.index.metadata.{GeoMesaMetadata, MetadataStringSerializer}
@@ -34,9 +37,9 @@ import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleF
 import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes
 import org.locationtech.geomesa.utils.index.IndexMode
 import org.locationtech.geomesa.utils.index.IndexMode.IndexMode
+import org.locationtech.geomesa.utils.io.WithClose
 import org.locationtech.geomesa.utils.stats.{IndexCoverage, Stat}
 import org.opengis.feature.simple.SimpleFeatureType
-import org.opengis.filter.Filter
 
 import scala.collection.JavaConversions._
 import scala.util.control.NonFatal
@@ -60,8 +63,10 @@ class AccumuloDataStore(val connector: Connector, override val config: AccumuloD
   private val statsTable = GeoMesaFeatureIndex.formatSharedTableName(config.catalog, "stats")
   override val stats = new AccumuloGeoMesaStats(this, statsTable, config.generateStats)
 
+  override protected val featureWriterFactory: AccumuloFeatureWriterFactory = new AccumuloFeatureWriterFactory(this)
+
   // If on a secured cluster, create a thread to periodically renew Kerberos tgt
-  val kerberosTgtRenewer: Option[ScheduledExecutorService] = try {
+  private val kerberosTgtRenewer: Option[ScheduledExecutorService] = try {
     if (UserGroupInformation.isSecurityEnabled) {
       val executor = Executors.newSingleThreadScheduledExecutor()
       executor.scheduleAtFixedRate(
@@ -101,50 +106,66 @@ class AccumuloDataStore(val connector: Connector, override val config: AccumuloD
 
   // data store hooks
 
-  override protected def createFeatureWriterAppend(sft: SimpleFeatureType,
-                                                   indices: Option[Seq[AccumuloFeatureIndexType]]): AccumuloFeatureWriterType =
-    new AccumuloAppendFeatureWriter(sft, this, indices, config.defaultVisibilities)
-
-  override protected def createFeatureWriterModify(sft: SimpleFeatureType,
-                                                   indices: Option[Seq[AccumuloFeatureIndexType]],
-                                                   filter: Filter): AccumuloFeatureWriterType =
-    new AccumuloModifyFeatureWriter(sft, this, indices, config.defaultVisibilities, filter)
-
   override protected def createFeatureCollection(query: Query, source: GeoMesaFeatureSource): GeoMesaFeatureCollection =
     new AccumuloFeatureCollection(source, query)
 
   override protected def createQueryPlanner(): AccumuloQueryPlannerType = new AccumuloQueryPlanner(this)
 
-  override protected def getIteratorVersion: Set[String] = {
-    def getVersions(table: String): Set[String] = {
-      val scanner = connector.createScanner(table, new Authorizations())
-      try {
-        ProjectVersionIterator.scanProjectVersion(scanner)
-      } catch {
-        case NonFatal(e) => Set("unavailable")
-      } finally {
-        scanner.close()
+  override protected def loadIteratorVersions: Set[String] = {
+    import org.locationtech.geomesa.utils.conversions.ScalaImplicits.RichIterator
+
+    // just check the first table available
+    val versions = getTypeNames.iterator.flatMap { typeName =>
+      getAllIndexTableNames(typeName).iterator.flatMap { table =>
+        try {
+          if (connector.tableOperations().exists(table)) {
+            WithClose(connector.createScanner(table, new Authorizations())) { scanner =>
+              ProjectVersionIterator.scanProjectVersion(scanner).iterator
+            }
+          } else {
+            Iterator.empty
+          }
+        } catch {
+          case NonFatal(_) => Iterator.empty
+        }
       }
     }
-    val ops = connector.tableOperations()
-    getTypeNames.toSet.flatMap(getAllTableNames).filter(ops.exists).flatMap(getVersions)
+    versions.headOption.toSet
   }
 
   @throws(classOf[IllegalArgumentException])
   override protected def validateNewSchema(sft: SimpleFeatureType): Unit = {
-    // check for old enabled indices and re-map them
-    SimpleFeatureTypes.Configs.ENABLED_INDEX_OPTS.find(sft.getUserData.containsKey).foreach { key =>
-      val indices = sft.getUserData.remove(key).toString.split(",").map(_.trim.toLowerCase)
-      // check for old attribute index name
-      val enabled = if (indices.contains("attr_idx")) {
-        indices.updated(indices.indexOf("attr_idx"), AttributeIndex.name)
-      } else {
-        indices
+    import org.locationtech.geomesa.index.conf.SchemaProperties.ValidateDistributedClasspath
+    // validate that the accumulo runtime is available
+    val namespace = catalog.indexOf('.') match {
+      case -1 => ""
+      case i  => catalog.substring(0, i)
+    }
+    AccumuloVersion.ensureNamespaceExists(connector, namespace)
+    val canLoad = connector.namespaceOperations().testClassLoad(namespace,
+          classOf[ProjectVersionIterator].getName, classOf[SortedKeyValueIterator[_, _]].getName)
+
+    if (!canLoad) {
+      val msg = s"Could not load GeoMesa distributed code from the Accumulo classpath for table '$catalog'"
+      logger.error(msg)
+      if (ValidateDistributedClasspath.toBoolean.contains(true)) {
+        val nsMsg = if (namespace.isEmpty) { "" } else { s" for the namespace '$namespace'" }
+        throw new RuntimeException(s"$msg. You may override this check by setting the system property " +
+            s"'${ValidateDistributedClasspath.property}=false'. Otherwise, please verify that the appropriate " +
+            s"JARs are installed$nsMsg - see http://www.geomesa.org/documentation/user/accumulo/install.html" +
+            "#installing-the-accumulo-distributed-runtime-library")
       }
-      sft.getUserData.put(SimpleFeatureTypes.Configs.ENABLED_INDICES, enabled.mkString(","))
+    }
+
+    // check for old enabled indices and re-map them
+    SimpleFeatureTypes.Configs.ENABLED_INDEX_OPTS.drop(1).find(sft.getUserData.containsKey).foreach { key =>
+      sft.getUserData.put(SimpleFeatureTypes.Configs.ENABLED_INDICES, sft.getUserData.remove(key))
     }
 
     super.validateNewSchema(sft)
+
+    // validate column groups
+    AccumuloColumnGroups.validate(sft)
 
     if (sft.isTableSharing &&
         getTypeNames.map(getSchema).exists(t => t.isTableSharing && t.isLogicalTime != sft.isLogicalTime)) {
@@ -176,8 +197,10 @@ class AccumuloDataStore(val connector: Connector, override val config: AccumuloD
     // check for newly indexed attributes and re-configure the splits
     val previousAttrIndices = previous.getAttributeDescriptors.collect { case d if d.isIndexed => d.getLocalName }
     if (sft.getAttributeDescriptors.exists(d => d.isIndexed && !previousAttrIndices.contains(d.getLocalName))) {
-      manager.indices(sft, IndexMode.Any).foreach {
-        case s: AttributeSplittable => s.configureSplits(sft, this)
+      val partitioned = TablePartition.partitioned(sft)
+      manager.indices(sft).foreach {
+        case s: AttributeSplittable if !partitioned => s.configureSplits(sft, this, None)
+        case s: AttributeSplittable => s.getPartitions(sft, this).foreach(p => s.configureSplits(sft, this, Some(p)))
         case _ => // no-op
       }
     }
@@ -197,7 +220,7 @@ class AccumuloDataStore(val connector: Connector, override val config: AccumuloD
   override def getSchema(typeName: String): SimpleFeatureType = {
     import GeoMesaMetadata.{ATTRIBUTES_KEY, SCHEMA_ID_KEY, STATS_GENERATION_KEY, VERSION_KEY}
     import SimpleFeatureTypes.Configs.{ENABLED_INDEX_OPTS, ENABLED_INDICES}
-    import SimpleFeatureTypes.InternalConfigs.{INDEX_VERSIONS, SCHEMA_VERSION_KEY}
+    import SimpleFeatureTypes.InternalConfigs.INDEX_VERSIONS
 
     var sft = super.getSchema(typeName)
 
@@ -220,9 +243,9 @@ class AccumuloDataStore(val connector: Connector, override val config: AccumuloD
       // back compatible check for index versions
       if (!sft.getUserData.contains(INDEX_VERSIONS)) {
         // back compatible check if user data wasn't encoded with the sft
-        if (!sft.getUserData.containsKey(SCHEMA_VERSION_KEY)) {
+        if (!sft.getUserData.containsKey(AccumuloFeatureIndex.DeprecatedSchemaVersionKey)) {
           metadata.read(typeName, "dtgfield").foreach(sft.setDtgField)
-          sft.getUserData.put(SCHEMA_VERSION_KEY, metadata.readRequired(typeName, VERSION_KEY))
+          sft.getUserData.put(AccumuloFeatureIndex.DeprecatedSchemaVersionKey, metadata.readRequired(typeName, VERSION_KEY))
 
           // If no data is written, we default to 'false' in order to support old tables.
           if (metadata.read(typeName, "tables.sharing").exists(_.toBoolean)) {
@@ -277,7 +300,6 @@ class AccumuloDataStore(val connector: Connector, override val config: AccumuloD
     super.dispose()
     kerberosTgtRenewer.foreach( _.shutdown() )
   }
-
 }
 
 object AccumuloDataStore {

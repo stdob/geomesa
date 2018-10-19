@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -11,7 +11,6 @@ package org.locationtech.geomesa.index.filters
 import java.util.Date
 
 import com.typesafe.scalalogging.LazyLogging
-import org.joda.time.Period
 import org.locationtech.geomesa.features.SerializationOption.SerializationOptions
 import org.locationtech.geomesa.features.kryo.KryoBufferSimpleFeature
 import org.locationtech.geomesa.index.api.{GeoMesaFeatureIndex, GeoMesaIndexManager}
@@ -83,7 +82,7 @@ object DtgAgeOffFilter {
 
   def configure(sft: SimpleFeatureType,
                 index: GeoMesaFeatureIndex[_, _, _],
-                expiry: Period,
+                expiry: scala.concurrent.duration.Duration,
                 dtgField: Option[String]): Map[String, String] = {
     import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 

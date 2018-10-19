@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -17,7 +17,7 @@ import org.locationtech.geomesa.index.stats.GeoMesaStats
 import org.locationtech.geomesa.index.utils.{ExplainNull, Explainer}
 import org.locationtech.geomesa.utils.conf.GeoMesaSystemProperties.SystemProperty
 import org.locationtech.geomesa.utils.index.IndexMode
-import org.locationtech.geomesa.utils.stats.{MethodProfiling, Timing, TimingsImpl}
+import org.locationtech.geomesa.utils.stats.MethodProfiling
 import org.opengis.feature.simple.SimpleFeatureType
 import org.opengis.filter.Filter
 
@@ -52,9 +52,9 @@ class CostBasedStrategyDecider extends StrategyDecider with MethodProfiling {
        transform: Option[SimpleFeatureType],
        explain: Explainer): FilterPlan[DS, F, W] = {
     val costs = options.map { option =>
-      implicit val timing = new Timing()
-      val optionCosts = profile(option.strategies.map(f => f.index.getCost(sft, stats, f, transform)))
-      (option, optionCosts.sum, timing.time)
+      var time = 0L
+      val optionCosts = profile(t => time = t)(option.strategies.map(f => f.index.getCost(sft, stats, f, transform)))
+      (option, optionCosts.sum, time)
     }.sortBy(_._2)
     explain(s"Costs: ${costs.map(c => s"${c._1} (Cost ${c._2} in ${c._3}ms)").mkString("; ")}")
     costs.head._1
@@ -95,16 +95,17 @@ object StrategyDecider extends MethodProfiling with LazyLogging {
        evaluation: CostEvaluation,
        requested: Option[GeoMesaFeatureIndex[DS, F, W]],
        explain: Explainer = ExplainNull): Seq[FilterStrategy[DS, F, W]] = {
-    implicit val timings = new TimingsImpl()
 
-    val availableIndices = ds.manager.indices(sft, IndexMode.Read)
+    val availableIndices = ds.manager.indices(sft, mode = IndexMode.Read)
 
     // get the various options that we could potentially use
-    val options = profile("split")(new FilterSplitter(sft, availableIndices).getQueryOptions(filter, transform))
+    var time = 0L
+    val options = profile(t => time = t) {
+      new FilterSplitter(sft, availableIndices).getQueryOptions(filter, transform)
+    }
+    explain(s"Query processing took ${time}ms and produced ${options.length} options")
 
-    explain(s"Query processing took ${timings.time("split")}ms and produced ${options.length} options")
-
-    val selected = profile("cost") {
+    val selected = profile(time => explain(s"Strategy selection took ${time}ms for ${options.length} options")) {
       if (requested.isDefined) {
         val forced = {
           val index = requested.get
@@ -137,8 +138,6 @@ object StrategyDecider extends MethodProfiling with LazyLogging {
         plan
       }
     }
-
-    explain(s"Strategy selection took ${timings.time("cost")}ms for ${options.length} options")
 
     selected.strategies
   }

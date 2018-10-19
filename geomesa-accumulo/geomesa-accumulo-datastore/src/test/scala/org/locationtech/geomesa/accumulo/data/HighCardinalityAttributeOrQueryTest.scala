@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -14,8 +14,7 @@ import org.junit.runner.RunWith
 import org.locationtech.geomesa.accumulo.TestWithDataStore
 import org.locationtech.geomesa.features.avro.AvroSimpleFeatureFactory
 import org.locationtech.geomesa.utils.collection.SelfClosingIterator
-import org.locationtech.geomesa.utils.geotools.SftBuilder
-import org.locationtech.geomesa.utils.geotools.SftBuilder.Opts
+import org.locationtech.geomesa.utils.geotools.SchemaBuilder
 import org.locationtech.geomesa.utils.stats.Cardinality
 import org.locationtech.geomesa.utils.text.WKTUtils
 import org.specs2.mutable.Specification
@@ -26,12 +25,12 @@ import scala.collection.JavaConversions._
 @RunWith(classOf[JUnitRunner])
 class HighCardinalityAttributeOrQueryTest extends Specification with TestWithDataStore {
 
-  val spec = new SftBuilder()
-    .stringType("high", Opts(index = true, cardinality = Cardinality.HIGH))
-    .stringType("low", Opts(index = true, cardinality = Cardinality.LOW))
-    .date("dtg", default = true)
-    .point("geom", default = true)
-    .getSpec
+  val spec = SchemaBuilder.builder()
+    .addString("high").withIndex(Cardinality.HIGH)
+    .addString("low").withIndex(Cardinality.LOW)
+    .addDate("dtg", default = true)
+    .addPoint("geom", default = true)
+    .spec
 
   val numFeatures = 10
   val builder = AvroSimpleFeatureFactory.featureBuilder(sft)

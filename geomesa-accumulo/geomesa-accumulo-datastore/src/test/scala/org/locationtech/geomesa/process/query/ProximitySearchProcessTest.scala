@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -9,18 +9,18 @@
 package org.locationtech.geomesa.process.query
 
 import com.vividsolutions.jts.geom.{Coordinate, Point}
-import org.geotools.factory.{CommonFactoryFinder, Hints}
+import org.geotools.factory.Hints
 import org.geotools.feature.DefaultFeatureCollection
+import org.geotools.filter.text.ecql.ECQL
 import org.geotools.geometry.jts.JTSFactoryFinder
-import org.joda.time.{DateTime, DateTimeZone}
+import org.geotools.referencing.GeodeticCalculator
 import org.junit.runner.RunWith
 import org.locationtech.geomesa.accumulo.TestWithMultipleSfts
 import org.locationtech.geomesa.accumulo.iterators.TestData
 import org.locationtech.geomesa.features.ScalaSimpleFeature
 import org.locationtech.geomesa.features.avro.AvroSimpleFeatureFactory
 import org.locationtech.geomesa.utils.collection.SelfClosingIterator
-import org.locationtech.geomesa.utils.filters.Filters
-import org.locationtech.geomesa.utils.geotools.{GeometryUtils, SimpleFeatureTypes}
+import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes
 import org.locationtech.geomesa.utils.text.WKTUtils
 import org.specs2.mutable.Specification
 import org.specs2.runner.JUnitRunner
@@ -33,10 +33,14 @@ class ProximitySearchProcessTest extends Specification with TestWithMultipleSfts
   sequential
 
   val geoFactory = JTSFactoryFinder.getGeometryFactory
-  val ff = CommonFactoryFinder.getFilterFactory2
 
-  def getPoint(lat: Double, lon: Double, meters: Double): Point =
-    GeometryUtils.farthestPoint(geoFactory.createPoint(new Coordinate(lat, lon)), meters)
+  def getPoint(lat: Double, lon: Double, meters: Double): Point = {
+    val calc = new GeodeticCalculator()
+    calc.setStartingGeographicPoint(lat, lon)
+    calc.setDirection(90, meters)
+    val dest2D = calc.getDestinationGeographicPoint
+    geoFactory.createPoint(new Coordinate(dest2D.getX, dest2D.getY))
+  }
 
   "GeomesaProximityQuery" should {
     "find things close by" in {
@@ -48,7 +52,7 @@ class ProximitySearchProcessTest extends Specification with TestWithMultipleSfts
         List(1, 2, 3, 4).zip(List(45, 46, 47, 48)).foreach { case (i, lat) =>
           val sf = AvroSimpleFeatureFactory.buildAvroFeature(sft, List(), name + i.toString)
           sf.setDefaultGeometry(WKTUtils.read(f"POINT($lat%d $lat%d)"))
-          sf.setAttribute("dtg", new DateTime("2011-01-01T00:00:00Z", DateTimeZone.UTC).toDate)
+          sf.setAttribute("dtg", "2011-01-01T00:00:00Z")
           sf.setAttribute("type", name)
           sf.getUserData()(Hints.USE_PROVIDED_FID) = java.lang.Boolean.TRUE
           featureCollection.add(sf)
@@ -72,7 +76,7 @@ class ProximitySearchProcessTest extends Specification with TestWithMultipleSfts
       List(1, 2, 3).zip(List(p1, p2, p3)).foreach { case (i, p) =>
         val sf = AvroSimpleFeatureFactory.buildAvroFeature(sft, List(), i.toString)
         sf.setDefaultGeometry(p)
-        sf.setAttribute("dtg", new DateTime("2011-01-01T00:00:00Z", DateTimeZone.UTC).toDate)
+        sf.setAttribute("dtg", "2011-01-01T00:00:00Z")
         sf.setAttribute("type", "fake")
         sf.getUserData()(Hints.USE_PROVIDED_FID) = java.lang.Boolean.TRUE
         inputFeatures.add(sf)
@@ -84,7 +88,7 @@ class ProximitySearchProcessTest extends Specification with TestWithMultipleSfts
       val prox = new ProximitySearchProcess
 
       // note: size returns an estimated amount, instead we need to actually count the features
-      def ex(p: Double) = SelfClosingIterator(prox.execute(inputFeatures, dataFeatures, p))
+      def ex(p: Double) = SelfClosingIterator(prox.execute(inputFeatures, dataFeatures, p)).toSeq
 
       ex(50.0)  must haveLength(0)
       ex(90.0)  must haveLength(0)
@@ -114,15 +118,14 @@ class ProximitySearchProcessTest extends Specification with TestWithMultipleSfts
       }
 
       // compose the query
-      val start   = new DateTime(2014, 6, 7, 11, 0, 0, DateTimeZone.forID("UTC"))
-      val end     = new DateTime(2014, 6, 7, 13, 0, 0, DateTimeZone.forID("UTC"))
+      val during = ECQL.toFilter("dtg DURING 2014-06-07T11:00:00.000Z/2014-06-07T13:00:00.000Z")
 
       val fs = ds.getFeatureSource(sftPointsName)
-      val dataFeatures = fs.getFeatures(ff.during(ff.property("dtg"), Filters.dts2lit(start, end)))
+      val dataFeatures = fs.getFeatures(during)
 
       val prox = new ProximitySearchProcess
       // note: size returns an estimated amount, instead we need to actually count the features
-      SelfClosingIterator(prox.execute(queryLine, dataFeatures, 150000.0)) must haveLength(50)
+      SelfClosingIterator(prox.execute(queryLine, dataFeatures, 150000.0)).toSeq must haveLength(50)
     }
   }
 
@@ -144,7 +147,7 @@ class ProximitySearchProcessTest extends Specification with TestWithMultipleSfts
       List(1, 2, 3).zip(List(p1, p2, p3)).foreach { case (i, p) =>
         val sf = AvroSimpleFeatureFactory.buildAvroFeature(sft, List(), i.toString)
         sf.setDefaultGeometry(p)
-        sf.setAttribute("dtg", new DateTime("2011-01-01T00:00:00Z", DateTimeZone.UTC).toDate)
+        sf.setAttribute("dtg", "2011-01-01T00:00:00Z")
         sf.setAttribute("type", "fake")
         sf.getUserData()(Hints.USE_PROVIDED_FID) = java.lang.Boolean.TRUE
         inputFeatures.add(sf)
@@ -156,7 +159,7 @@ class ProximitySearchProcessTest extends Specification with TestWithMultipleSfts
         List(1, 2, 3, 4).zip(List(45, 46, 47, 48)).foreach { case (i, lat) =>
           val sf = AvroSimpleFeatureFactory.buildAvroFeature(sft, List(), name + i.toString)
           sf.setDefaultGeometry(WKTUtils.read(f"POINT($lat%d $lat%d)"))
-          sf.setAttribute("dtg", new DateTime("2011-01-01T00:00:00Z", DateTimeZone.UTC).toDate)
+          sf.setAttribute("dtg", "2011-01-01T00:00:00Z")
           sf.setAttribute("type", name)
           sf.getUserData()(Hints.USE_PROVIDED_FID) = java.lang.Boolean.TRUE
           nonAccumulo.add(sf)

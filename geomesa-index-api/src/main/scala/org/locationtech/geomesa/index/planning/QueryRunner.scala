@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -10,7 +10,6 @@ package org.locationtech.geomesa.index.planning
 
 import org.geotools.data.Query
 import org.geotools.factory.Hints
-import org.geotools.filter.visitor.BindingFilterVisitor
 import org.geotools.geometry.jts.ReferencedEnvelope
 import org.locationtech.geomesa.filter.visitor.QueryPlanFilterVisitor
 import org.locationtech.geomesa.filter.{andFilters, decomposeAnd, ff}
@@ -47,12 +46,15 @@ trait QueryRunner {
     }
 
     // handle any params passed in through geoserver
-    ViewParams.setHints(sft, query)
+    ViewParams.setHints(query)
 
     // set transformations in the query
     QueryPlanner.setQueryTransforms(query, sft)
     // set return SFT in the query
     query.getHints.put(QueryHints.Internal.RETURN_SFT, getReturnSft(sft, query.getHints))
+
+    // set sorting in the query
+    QueryPlanner.setQuerySort(sft, query)
 
     // add the bbox from the density query to the filter
     if (query.getHints.isDensityQuery) {
@@ -95,10 +97,8 @@ trait QueryRunner {
     */
   protected def optimizeFilter(sft: SimpleFeatureType, filter: Filter): Filter = {
     // bind the literal values to the appropriate type, so that it isn't done every time the filter is evaluated
-    // important: do this before running through the QueryPlanFilterVisitor, otherwise can mess with IDL handling
-    filter.accept(new BindingFilterVisitor(sft), null).asInstanceOf[Filter]
     // update the filter to remove namespaces, handle null property names, and tweak topological filters
-      .accept(new QueryPlanFilterVisitor(sft), null).asInstanceOf[Filter]
+    QueryPlanFilterVisitor.apply(sft, filter)
   }
 
   /**
@@ -111,5 +111,14 @@ trait QueryRunner {
   protected [geomesa] def getReturnSft(sft: SimpleFeatureType, hints: Hints): SimpleFeatureType = {
     import org.locationtech.geomesa.index.conf.QueryHints.RichHints
     hints.getTransformSchema.getOrElse(sft)
+  }
+}
+
+object QueryRunner {
+  // used for configuring input queries
+  val default: QueryRunner = new QueryRunner {
+    override def runQuery(sft: SimpleFeatureType,
+                          query: Query,
+                          explain: Explainer): CloseableIterator[SimpleFeature] = throw new NotImplementedError
   }
 }

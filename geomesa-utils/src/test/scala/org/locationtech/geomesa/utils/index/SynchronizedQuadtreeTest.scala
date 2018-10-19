@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -142,7 +142,7 @@ class SynchronizedQuadtreeWithMetrics extends SynchronizedQuadtree[Point] {
   val totalReads = new AtomicLong()
   val totalWrites = new AtomicLong()
 
-  override protected[index] def withLock[T](lock: Lock)(fn: => T) = {
+  override protected [index] def withLock[U](lock: Lock)(fn: => U): U = {
     val start = System.currentTimeMillis()
     lock.lock()
     val time = System.currentTimeMillis() - start

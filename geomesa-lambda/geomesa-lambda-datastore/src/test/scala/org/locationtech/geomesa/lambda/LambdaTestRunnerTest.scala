@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -17,12 +17,14 @@ import org.junit.runner.RunWith
 import org.locationtech.geomesa.lambda.LambdaTestRunnerTest.LambdaTest
 import org.specs2.mutable.Specification
 import org.specs2.runner.JUnitRunner
+import org.specs2.specification.BeforeAfterAll
+import org.specs2.specification.core.{Env, Fragments}
 
 /**
   * Base class for running all kafka/zk embedded tests
   */
 @RunWith(classOf[JUnitRunner])
-class LambdaTestRunnerTest extends Specification with LazyLogging {
+class LambdaTestRunnerTest extends Specification with BeforeAfterAll with LazyLogging {
 
   var kafka: EmbeddedKafka = _
 
@@ -33,16 +35,17 @@ class LambdaTestRunnerTest extends Specification with LazyLogging {
     new ZookeeperOffsetManagerTest
   )
 
-  step {
+  override def beforeAll(): Unit = {
     logger.info("Starting embedded kafka/zk")
     kafka = new EmbeddedKafka()
     logger.info("Started embedded kafka/zk")
     specs.foreach { s => s.brokers = kafka.brokers; s.zookeepers = kafka.zookeepers }
   }
 
-  specs.foreach(link)
+  override def map(fs: => Fragments, env: Env): Fragments =
+    specs.foldLeft(super.map(fs, env))((fragments, spec) => fragments ^ spec.fragments(env))
 
-  step {
+  override def afterAll(): Unit = {
     logger.info("Stopping embedded kafka/zk")
     kafka.close()
     logger.info("Stopped embedded kafka/zk")

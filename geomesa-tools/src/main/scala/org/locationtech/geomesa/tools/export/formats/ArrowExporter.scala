@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -43,7 +43,7 @@ class ArrowExporter(hints: Hints, os: OutputStream, queryDictionaries: => Map[St
     if (sft == org.locationtech.geomesa.arrow.ArrowEncodedSft) {
       doExport = exportEncoded
     } else {
-      val encoding = SimpleFeatureEncoding.min(hints.isArrowIncludeFid)
+      val encoding = SimpleFeatureEncoding.min(hints.isArrowIncludeFid, hints.isArrowProxyFid)
       val sort = hints.getArrowSort
       val batchSize = hints.getArrowBatchSize.getOrElse(ArrowProperties.BatchSize.get.toInt)
       val dictionaryFields = hints.getArrowDictionaryFields

@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -16,6 +16,7 @@ import org.geotools.data.DataAccessFactory.Param
 import org.geotools.data.Parameter
 import org.locationtech.geomesa.utils.conf.GeoMesaSystemProperties.SystemProperty
 import org.locationtech.geomesa.utils.geotools.GeoMesaParam._
+import org.locationtech.geomesa.utils.text.DurationParsing
 
 import scala.concurrent.duration.Duration
 import scala.reflect.ClassTag
@@ -72,7 +73,7 @@ class GeoMesaParam[T <: AnyRef](_key: String, // can't override final 'key' fiel
   }
 
   // ensure that sys property default is the same as param default, otherwise param default will not be used
-  assert(systemProperty.forall(p => p.prop.default == null || parse(p.prop.default) == default))
+  assert(systemProperty.forall(p => p.prop.default == null || toTypedValue(parse(p.prop.default)) == default))
 
   /**
     * Checks that the parameter is contained in the map, but does not do type conversion
@@ -107,13 +108,13 @@ class GeoMesaParam[T <: AnyRef](_key: String, // can't override final 'key' fiel
       if (deprecatedKeys.contains(oldKey)) {
         lookUp(Collections.singletonMap(key, params.get(oldKey)))
       } else {
-        deprecatedParams.dropWhile(_.key != oldKey).head.lookup(params, required)
+        fromTypedValue(deprecatedParams.dropWhile(_.key != oldKey).head.lookup(params, required))
       }
     } else if (required) {
       throw new IOException(s"Parameter $key is required: $description")
     } else {
       systemProperty.flatMap(_.option) match {
-        case Some(v) => v
+        case Some(v) => fromTypedValue(v)
         case None    => null
       }
     }
@@ -168,7 +169,7 @@ object GeoMesaParam {
   }
 
   case class SystemPropertyBooleanParam(prop: SystemProperty) extends SystemPropertyParam[java.lang.Boolean] {
-    override def option: Option[java.lang.Boolean] = prop.toBoolean
+    override def option: Option[java.lang.Boolean] = prop.toBoolean.map(Boolean.box)
   }
 
   case class SystemPropertyIntegerParam(prop: SystemProperty) extends SystemPropertyParam[Integer] {
@@ -204,7 +205,7 @@ object GeoMesaParam {
     }
   }
 
-  private def parseDuration(text: String): Duration = Duration(text)
+  private def parseDuration(text: String): Duration = DurationParsing.caseInsensitive(text)
 
   private def printDuration(duration: Duration): String =
     if (duration == Duration.Inf) { "Inf" } else { duration.toString }

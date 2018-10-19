@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -12,30 +12,27 @@ import java.util.{Collections, Date}
 
 import com.vividsolutions.jts.geom.Coordinate
 import org.geotools.data._
-import org.geotools.factory.{CommonFactoryFinder, Hints}
+import org.geotools.factory.Hints
 import org.geotools.feature.NameImpl
 import org.geotools.filter.text.cql2.CQL
 import org.geotools.filter.text.ecql.ECQL
 import org.geotools.geometry.jts.JTSFactoryFinder
 import org.geotools.util.Converters
-import org.joda.time.{DateTime, DateTimeZone}
 import org.junit.runner.RunWith
 import org.locationtech.geomesa.accumulo.index._
 import org.locationtech.geomesa.accumulo.iterators.TestData
 import org.locationtech.geomesa.accumulo.{AccumuloFeatureIndexType, TestWithMultipleSfts}
 import org.locationtech.geomesa.features.ScalaSimpleFeature
+import org.locationtech.geomesa.index.conf.QueryHints._
+import org.locationtech.geomesa.index.conf.{QueryHints, QueryProperties}
+import org.locationtech.geomesa.index.utils.{ExplainNull, ExplainString}
 import org.locationtech.geomesa.utils.bin.BinaryOutputEncoder
 import org.locationtech.geomesa.utils.bin.BinaryOutputEncoder.EncodedValues
-import org.locationtech.geomesa.index.conf.QueryHints
-import org.locationtech.geomesa.index.conf.QueryHints._
-import org.locationtech.geomesa.index.utils.{ExplainNull, ExplainString}
 import org.locationtech.geomesa.utils.collection.SelfClosingIterator
-import org.locationtech.geomesa.utils.filters.Filters
 import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes
 import org.opengis.filter.Filter
 import org.specs2.mutable.Specification
 import org.specs2.runner.JUnitRunner
-import org.specs2.time.Duration
 
 import scala.collection.JavaConversions._
 import scala.util.Random
@@ -43,9 +40,10 @@ import scala.util.Random
 @RunWith(classOf[JUnitRunner])
 class AccumuloDataStoreQueryTest extends Specification with TestWithMultipleSfts {
 
+  import org.locationtech.geomesa.filter.ff
+
   sequential
 
-  val ff = CommonFactoryFinder.getFilterFactory2
   val defaultSft = createNewSchema("name:String:index=join,geom:Point:srid=4326,dtg:Date")
   addFeature(defaultSft, ScalaSimpleFeature.create(defaultSft, "fid-1", "name1", "POINT(45 49)", "2010-05-07T12:30:00.000Z"))
 
@@ -112,13 +110,11 @@ class AccumuloDataStoreQueryTest extends Specification with TestWithMultipleSfts
 
       // add the 50 included points
       TestData.includedDwithinPoints.zipWithIndex.foreach{ case (p, i) =>
-        addFeature(sftPoints, ScalaSimpleFeature.create(sftPoints, "infid$i", p, "2014-06-07T12:00:00.000Z"))
+        addFeature(sftPoints, ScalaSimpleFeature.create(sftPoints, s"infid$i", p, "2014-06-07T12:00:00.000Z"))
       }
 
       // compose the query
-      val start   = new DateTime(2014, 6, 7, 11, 0, 0, DateTimeZone.forID("UTC"))
-      val end     = new DateTime(2014, 6, 7, 13, 0, 0, DateTimeZone.forID("UTC"))
-      val during  = ff.during(ff.property("dtg"), Filters.dts2lit(start, end))
+      val during = ECQL.toFilter("dtg DURING 2014-06-07T11:00:00.000Z/2014-06-07T13:00:00.000Z")
 
       "with correct result when using a dwithin of degrees" >> {
         val dwithinUsingDegrees = ff.dwithin(ff.property("geom"),
@@ -135,7 +131,7 @@ class AccumuloDataStoreQueryTest extends Specification with TestWithMultipleSfts
         val filterUsingMeters  = ff.and(during, dwithinUsingMeters)
         val queryUsingMeters   = new Query(sftPoints.getTypeName, filterUsingMeters)
         val resultsUsingMeters = ds.getFeatureSource(sftPoints.getTypeName).getFeatures(queryUsingMeters)
-        SelfClosingIterator(resultsUsingMeters.features) must haveLength(50)
+        SelfClosingIterator(resultsUsingMeters.features).toSeq must haveLength(50)
       }
     }
 
@@ -157,10 +153,10 @@ class AccumuloDataStoreQueryTest extends Specification with TestWithMultipleSfts
       }
 
       planNull must haveLength(1)
-      planNull.head.table mustEqual Z2Index.getTableName(defaultSft.getTypeName, ds)
+      planNull.head.tables mustEqual Z2Index.getTableNames(defaultSft, ds)
 
       planEmpty must haveLength(1)
-      planEmpty.head.table mustEqual Z2Index.getTableName(defaultSft.getTypeName, ds)
+      planEmpty.head.tables mustEqual Z2Index.getTableNames(defaultSft, ds)
 
       explainNull must contain("Filter plan: FilterPlan[Z2Index[BBOX(geom, 40.0,44.0,50.0,54.0)][None]]")
       explainEmpty must contain("Filter plan: FilterPlan[Z2Index[BBOX(geom, 40.0,44.0,50.0,54.0)][None]]")
@@ -273,6 +269,7 @@ class AccumuloDataStoreQueryTest extends Specification with TestWithMultipleSfts
 
     "handle requests with namespaces" in {
       import AccumuloDataStoreParams.NamespaceParam
+
       import scala.collection.JavaConversions._
 
       val ns = "mytestns"
@@ -479,12 +476,62 @@ class AccumuloDataStoreQueryTest extends Specification with TestWithMultipleSfts
     }
 
     "kill queries after a configurable timeout" in {
+      import scala.concurrent.duration._
+
       val params = dsParams ++ Map(AccumuloDataStoreParams.QueryTimeoutParam.getName -> "1s")
 
       val dsWithTimeout = DataStoreFinder.getDataStore(params).asInstanceOf[AccumuloDataStore]
       val reader = dsWithTimeout.getFeatureReader(new Query(defaultSft.getTypeName, Filter.INCLUDE), Transaction.AUTO_COMMIT)
       reader.isClosed must beFalse
-      reader.isClosed must eventually(10, new Duration(1000))(beTrue) // reaper thread runs every 5 seconds
+      eventually(20, 200.millis)(reader.isClosed must beTrue)
+    }
+
+    "block full table scans" in {
+      val sft = createNewSchema("name:String:index=join,age:Int,geom:Point:srid=4326,dtg:Date")
+      val feature = ScalaSimpleFeature.create(sft, "fid-1", "name1", "23", "POINT(45 49)", "2010-05-07T12:30:00.000Z")
+      addFeature(sft, feature)
+
+      val filters = Seq(
+        "IN ('fid-1')",
+        "name = 'name1'",
+        "name IN ('name1', 'name2')",
+        "bbox(geom,44,48,46,50)",
+        "bbox(geom,44,48,46,50) AND age < 25",
+        "dtg during 2010-05-07T12:25:00.000Z/2010-05-07T12:35:00.000Z",
+        "bbox(geom,44,48,46,50) AND dtg during 2010-05-07T12:25:00.000Z/2010-05-07T12:35:00.000Z  AND age = 23"
+      )
+      val fullScans = Seq("INCLUDE", "age = 23")
+
+      // test that blocking full table scans doesn't interfere with regular queries
+      QueryProperties.BlockFullTableScans.threadLocalValue.set("true")
+      try {
+        foreach(filters) { filter =>
+          val query = new Query(sft.getTypeName, ECQL.toFilter(filter))
+          val features = SelfClosingIterator(ds.getFeatureSource(sft.getTypeName).getFeatures(query).features).toList
+          features mustEqual List(feature)
+        }
+        foreach(fullScans) { filter =>
+          val query = new Query(sft.getTypeName, ECQL.toFilter(filter))
+          ds.getFeatureSource(sft.getTypeName).getFeatures(query).features must throwA[RuntimeException]
+        }
+        // verify that we can override individually
+        System.setProperty(s"geomesa.scan.${sft.getTypeName}.block-full-table", "false")
+        foreach(fullScans) { filter =>
+          val query = new Query(sft.getTypeName, ECQL.toFilter(filter))
+          val features = SelfClosingIterator(ds.getFeatureSource(sft.getTypeName).getFeatures(query).features).toList
+          features mustEqual List(feature)
+        }
+        // verify that we can also block individually
+        QueryProperties.BlockFullTableScans.threadLocalValue.remove()
+        System.setProperty(s"geomesa.scan.${sft.getTypeName}.block-full-table", "true")
+        foreach(fullScans) { filter =>
+          val query = new Query(sft.getTypeName, ECQL.toFilter(filter))
+          ds.getFeatureSource(sft.getTypeName).getFeatures(query).features must throwA[RuntimeException]
+        }
+      } finally {
+        QueryProperties.BlockFullTableScans.threadLocalValue.remove()
+        System.clearProperty(s"geomesa.scan.${sft.getTypeName}.block-full-table")
+      }
     }
 
     "allow query strategy to be specified via view params" in {

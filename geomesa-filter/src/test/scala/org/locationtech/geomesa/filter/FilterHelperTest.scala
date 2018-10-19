@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,15 +8,17 @@
 
 package org.locationtech.geomesa.filter
 
+import java.time.temporal.ChronoUnit
+import java.time.{ZoneOffset, ZonedDateTime}
 import java.util.Date
 
-import org.geotools.factory.CommonFactoryFinder
 import org.geotools.filter.text.ecql.ECQL
+import org.geotools.filter.{IsGreaterThanImpl, IsLessThenImpl, LiteralExpressionImpl}
 import org.geotools.util.Converters
-import org.joda.time.{DateTime, DateTimeZone}
 import org.junit.runner.RunWith
 import org.locationtech.geomesa.filter.Bounds.Bound
 import org.locationtech.geomesa.filter.visitor.QueryPlanFilterVisitor
+import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes
 import org.opengis.filter._
 import org.specs2.mutable.Specification
 import org.specs2.runner.JUnitRunner
@@ -24,17 +26,44 @@ import org.specs2.runner.JUnitRunner
 @RunWith(classOf[JUnitRunner])
 class FilterHelperTest extends Specification {
 
-  val ff = CommonFactoryFinder.getFilterFactory2
+  val sft = SimpleFeatureTypes.createType("FilterHelperTest",
+    "dtg:Date,number:Int,a:Int,b:Int,c:Int,*geom:Point:srid=4326")
 
-  def updateFilter(filter: Filter): Filter = filter.accept(new QueryPlanFilterVisitor(null), null).asInstanceOf[Filter]
+  def updateFilter(filter: Filter): Filter = QueryPlanFilterVisitor.apply(sft, filter)
 
-  def toInterval(dt1: String, dt2: String, inclusive: Boolean = true): Bounds[DateTime] = {
-    val s = Option(Converters.convert(dt1, classOf[Date])).map(new DateTime(_, DateTimeZone.UTC))
-    val e = Option(Converters.convert(dt2, classOf[Date])).map(new DateTime(_, DateTimeZone.UTC))
+  def toInterval(dt1: String, dt2: String, inclusive: Boolean = true): Bounds[ZonedDateTime] = {
+    val s = Option(Converters.convert(dt1, classOf[Date])).map(d => ZonedDateTime.ofInstant(d.toInstant, ZoneOffset.UTC))
+    val e = Option(Converters.convert(dt2, classOf[Date])).map(d => ZonedDateTime.ofInstant(d.toInstant, ZoneOffset.UTC))
     Bounds(Bound(s, if (s.isDefined) inclusive else false), Bound(e, if (e.isDefined) inclusive else false))
   }
 
   "FilterHelper" should {
+
+    "evaluate functions with 0 arguments" >> {
+      val filter = ECQL.toFilter("dtg < currentDate()")
+      val updated = updateFilter(filter)
+      updated.asInstanceOf[IsLessThenImpl].getExpression2.isInstanceOf[LiteralExpressionImpl] mustEqual true
+    }
+
+    "evaluate functions with 1 argument" >> {
+      val filter = ECQL.toFilter("dtg > currentDate('P2D')")
+      val updated = updateFilter(filter)
+      updated.asInstanceOf[IsGreaterThanImpl].getExpression2.isInstanceOf[LiteralExpressionImpl] mustEqual true
+    }
+
+    "evaluate functions representing the last day" >> {
+      val filter = ECQL.toFilter("dtg > currentDate('-P1D') AND dtg < currentDate()")
+      val updated = updateFilter(filter)
+      val intervals = FilterHelper.extractIntervals(updated, "dtg", handleExclusiveBounds = true)
+      intervals.values(0).lower.value.get.until(
+        intervals.values(0).upper.value.get, ChronoUnit.HOURS) must beCloseTo(24l, 2)
+    }
+
+    "evaluate functions with math" >> {
+      val filter = ECQL.toFilter("number < 1+2")
+      val updated = updateFilter(filter)
+      updated.asInstanceOf[IsLessThenImpl].getExpression2.evaluate(null) mustEqual 3
+    }
 
     "fix out of bounds bbox" >> {
       val filter = ff.bbox(ff.property("geom"), -181, -91, 181, 91, "4326")

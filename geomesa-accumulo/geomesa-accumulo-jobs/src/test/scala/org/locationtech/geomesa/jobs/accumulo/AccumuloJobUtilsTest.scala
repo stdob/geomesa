@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -49,7 +49,7 @@ class AccumuloJobUtilsTest extends Specification with TestWithDataStore {
     "load list of jars from class resource" in {
       AccumuloJobUtils.defaultLibJars must not(beNull)
       AccumuloJobUtils.defaultLibJars must not(beEmpty)
-      AccumuloJobUtils.defaultLibJars must contain("accumulo")
+      AccumuloJobUtils.defaultLibJars must contain("accumulo-core")
       AccumuloJobUtils.defaultLibJars must contain("libthrift")
     }
     "not return join plans for getSingleQueryPlan" in {

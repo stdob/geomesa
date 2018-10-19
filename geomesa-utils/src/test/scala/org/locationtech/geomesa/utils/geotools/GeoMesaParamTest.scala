@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -14,7 +14,7 @@ import java.io.IOException
 import com.typesafe.scalalogging.LazyLogging
 import org.junit.runner.RunWith
 import org.locationtech.geomesa.utils.conf.GeoMesaSystemProperties.SystemProperty
-import org.locationtech.geomesa.utils.geotools.GeoMesaParam.{SystemPropertyBooleanParam, SystemPropertyIntegerParam, SystemPropertyStringParam}
+import org.locationtech.geomesa.utils.geotools.GeoMesaParam.{SystemPropertyBooleanParam, SystemPropertyDurationParam, SystemPropertyIntegerParam, SystemPropertyStringParam}
 import org.specs2.mutable.Specification
 import org.specs2.runner.JUnitRunner
 
@@ -118,7 +118,18 @@ class GeoMesaParamTest extends Specification with LazyLogging {
     }
     "lookup durations" in {
       new GeoMesaParam[Duration]("foo").lookup(Map("foo" -> "10s")) mustEqual Duration("10s")
+      new GeoMesaParam[Duration]("foo").lookup(Map("foo" -> "10S")) mustEqual Duration("10s")
+      new GeoMesaParam[Duration]("foo").lookup(Map("foo" -> "Inf")) mustEqual Duration.Inf
+      new GeoMesaParam[Duration]("foo").lookup(Map("foo" -> "inf")) mustEqual Duration.Inf
       new GeoMesaParam[Duration]("foo").lookup(Map("foo" -> "bar")) must throwAn[IOException]
+    }
+    "lookup durations with defaults" in {
+      new GeoMesaParam[Duration]("foo", default = Duration("10s")).lookup(Map("foo" -> "10s")) mustEqual Duration("10s")
+      new GeoMesaParam[Duration]("foo", default = Duration("10s")).lookup(Map.empty[String, String]) mustEqual Duration("10s")
+    }
+    "lookup durations with defaults and system properties" in {
+      new GeoMesaParam[Duration]("foo", default = Duration("10s"), systemProperty = Some(SystemPropertyDurationParam(SystemProperty("params.foo", "10s")))).lookup(Map("foo" -> "10s")) mustEqual Duration("10s")
+      new GeoMesaParam[Duration]("foo", default = Duration("10s"), systemProperty = Some(SystemPropertyDurationParam(SystemProperty("params.foo", "10s")))).lookup(Map.empty[String, String]) mustEqual Duration("10s")
     }
   }
 }

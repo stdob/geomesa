@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -139,8 +139,8 @@ object ArrowDictionary {
 
     override def toDictionary(precision: SimpleFeatureEncoding)(implicit allocator: BufferAllocator): Dictionary = {
       val name = s"dictionary-$id"
-      val (objectType, bindings) = ObjectType.selectType(ct.runtimeClass)
-      val writer = ArrowAttributeWriter(name, bindings.+:(objectType), ct.runtimeClass, None, None, Map.empty, precision)
+      val bindings = ObjectType.selectType(ct.runtimeClass)
+      val writer = ArrowAttributeWriter(name, bindings, None, None, Map.empty, precision)
 
       var i = 0
       while (i < length) {
@@ -170,9 +170,8 @@ object ArrowDictionary {
 
     // we use an attribute reader to get the right type conversion
     private val reader = ArrowAttributeReader(descriptor, vector, None, precision)
-    private val accessor = vector.getAccessor
 
-    override val length: Int = accessor.getValueCount
+    override val length: Int = vector.getValueCount
 
     override def lookup(i: Int): AnyRef = if (i < length) { reader.apply(i) } else { "[other]" }
 

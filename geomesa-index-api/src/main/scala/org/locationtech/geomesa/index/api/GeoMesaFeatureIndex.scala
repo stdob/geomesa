@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -9,14 +9,17 @@
 package org.locationtech.geomesa.index.api
 
 import java.nio.charset.StandardCharsets
-import java.util.Locale
+import java.util.{Locale, UUID}
 
+import com.typesafe.scalalogging.LazyLogging
 import org.apache.commons.codec.binary.Hex
 import org.geotools.factory.Hints
+import org.locationtech.geomesa.index.conf.partition.TablePartition
 import org.locationtech.geomesa.index.geotools.GeoMesaDataStore
 import org.locationtech.geomesa.index.stats.GeoMesaStats
 import org.locationtech.geomesa.index.utils.{ExplainNull, Explainer}
-import org.opengis.feature.simple.SimpleFeatureType
+import org.locationtech.geomesa.utils.index.ByteArrays
+import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 import org.opengis.filter.Filter
 
 /**
@@ -26,13 +29,14 @@ import org.opengis.filter.Filter
   * @tparam F wrapper around a simple feature - used for caching write calculations
   * @tparam WriteResult feature writers will transform simple features into these
   */
-trait GeoMesaFeatureIndex[DS <: GeoMesaDataStore[DS, F, WriteResult], F <: WrappedFeature, WriteResult] {
+trait GeoMesaFeatureIndex[DS <: GeoMesaDataStore[DS, F, WriteResult], F <: WrappedFeature, WriteResult]
+    extends LazyLogging {
 
   type TypedFilterStrategy = FilterStrategy[DS, F, WriteResult]
 
   lazy val identifier: String = s"$name:$version"
 
-  lazy val tableNameKey: String = s"table.$name.v$version"
+  lazy private val tableNameKey: String = s"table.$name.v$version"
 
   /**
     * The name used to identify the index
@@ -55,13 +59,72 @@ trait GeoMesaFeatureIndex[DS <: GeoMesaDataStore[DS, F, WriteResult], F <: Wrapp
   def supports(sft: SimpleFeatureType): Boolean
 
   /**
+    * The metadata key used to store the table name for this index
+    *
+    * @param partition partition
+    * @return
+    */
+  def tableNameKey(partition: Option[String] = None): String =
+    partition.map(p => s"$tableNameKey.$p").getOrElse(tableNameKey)
+
+  /**
     * Configure the index upon initial creation
     *
     * @param sft simple feature type
     * @param ds data store
+    * @param partition partition
+    * @return table name
     */
-  def configure(sft: SimpleFeatureType, ds: DS): Unit =
-    ds.metadata.insert(sft.getTypeName, tableNameKey, generateTableName(sft, ds))
+  def configure(sft: SimpleFeatureType, ds: DS, partition: Option[String] = None): String = {
+    val key = tableNameKey(partition)
+    ds.metadata.read(sft.getTypeName, key).getOrElse {
+      val name = generateTableName(sft, ds, partition)
+      ds.metadata.insert(sft.getTypeName, key, name)
+      name
+    }
+  }
+
+  /**
+    * Deletes the entire index
+    *
+    * @param sft simple feature type
+    * @param ds data store
+    * @param partition only delete a single partition, instead of the whole index
+    */
+  def delete(sft: SimpleFeatureType, ds: DS, partition: Option[String] = None): Unit = {
+    partition match {
+      case None => ds.metadata.scan(sft.getTypeName, tableNameKey).foreach(k => ds.metadata.remove(sft.getTypeName, k._1))
+      case Some(p) => ds.metadata.remove(sft.getTypeName, s"$tableNameKey.$p")
+    }
+  }
+
+  /**
+    * Gets the table name for this index
+    *
+    * @param sft simple feature type
+    * @param ds data store
+    * @return
+    */
+  def getTableNames(sft: SimpleFeatureType, ds: DS, partition: Option[String] = None): Seq[String] = {
+    partition match {
+      case None => ds.metadata.scan(sft.getTypeName, tableNameKey).map(_._2)
+      case Some(p) => ds.metadata.read(sft.getTypeName, s"$tableNameKey.$p").toSeq
+    }
+  }
+
+  /**
+    * Gets the partitions for this index, assuming that the schema is partitioned
+    *
+    * @param sft simple feature type
+    * @param ds data store
+    * @return
+    */
+  def getPartitions(sft: SimpleFeatureType, ds: DS): Seq[String] = {
+    if (!TablePartition.partitioned(sft)) { Seq.empty } else {
+      val offset = tableNameKey.length + 1
+      ds.metadata.scan(sft.getTypeName, tableNameKey).map { case (k, _) => k.substring(offset) }
+    }
+  }
 
   /**
     * Creates a function to write a feature to the index
@@ -70,7 +133,7 @@ trait GeoMesaFeatureIndex[DS <: GeoMesaDataStore[DS, F, WriteResult], F <: Wrapp
     * @param ds data store
     * @return
     */
-  def writer(sft: SimpleFeatureType, ds: DS): (F) => Seq[WriteResult]
+  def writer(sft: SimpleFeatureType, ds: DS): F => Seq[WriteResult]
 
   /**
     * Creates a function to delete a feature from the index
@@ -79,16 +142,15 @@ trait GeoMesaFeatureIndex[DS <: GeoMesaDataStore[DS, F, WriteResult], F <: Wrapp
     * @param ds data store
     * @return
     */
-  def remover(sft: SimpleFeatureType, ds: DS): (F) => Seq[WriteResult]
+  def remover(sft: SimpleFeatureType, ds: DS): F => Seq[WriteResult]
 
   /**
-    * Deletes the entire index
+    * Removes all values from the index
     *
     * @param sft simple feature type
     * @param ds data store
-    * @param shared true if this index shares physical space with another (e.g. shared tables)
     */
-  def delete(sft: SimpleFeatureType, ds: DS, shared: Boolean): Unit
+  def removeAll(sft: SimpleFeatureType, ds: DS): Unit
 
   /**
     * Indicates whether the ID for each feature is serialized with the feature or in the row
@@ -100,20 +162,24 @@ trait GeoMesaFeatureIndex[DS <: GeoMesaDataStore[DS, F, WriteResult], F <: Wrapp
 
   /**
     *
-    * Retrieve an ID from a row. All indices are assumed to encode the feature ID into the row key
+    * Retrieve an ID from a row. All indices are assumed to encode the feature ID into the row key.
+    *
+    * The simple feature in the returned function signature is optional (null ok) - if provided the
+    * parsed UUID will be cached in the feature user data, if the sft is marked as using UUIDs
     *
     * @param sft simple feature type
-    * @return a function to retrieve an ID from a row - (row: Array[Byte], offset: Int, length: Int)
+    * @return a function to retrieve an ID from a row - (row: Array[Byte], offset: Int, length: Int, feature: SimpleFeature)
     */
-  def getIdFromRow(sft: SimpleFeatureType): (Array[Byte], Int, Int) => String
+  def getIdFromRow(sft: SimpleFeatureType): (Array[Byte], Int, Int, SimpleFeature) => String
 
   /**
     * Gets the initial splits for a table
     *
     * @param sft simple feature type
+    * @param partition partition, if any
     * @return
     */
-  def getSplits(sft: SimpleFeatureType): Seq[Array[Byte]]
+  def getSplits(sft: SimpleFeatureType, partition: Option[String] = None): Seq[Array[Byte]]
 
   /**
     * Gets options for a 'simple' filter, where each OR is on a single attribute, e.g.
@@ -152,14 +218,20 @@ trait GeoMesaFeatureIndex[DS <: GeoMesaDataStore[DS, F, WriteResult], F <: Wrapp
                    explain: Explainer = ExplainNull): QueryPlan[DS, F, WriteResult]
 
   /**
-    * Gets the table name for this index
+    * Gets the tables that should be scanned to satisfy a query
     *
-    * @param typeName simple feature type name
+    * @param sft simple feature type
     * @param ds data store
+    * @param filter filter
     * @return
     */
-  def getTableName(typeName: String, ds: DS): String = ds.metadata.read(typeName, tableNameKey).getOrElse {
-    throw new RuntimeException(s"Could not read table name from metadata for index $identifier")
+  def getTablesForQuery(sft: SimpleFeatureType, ds: DS, filter: Option[Filter]): Seq[String] = {
+    val partitions = filter.toSeq.flatMap(f => TablePartition(ds, sft).toSeq.flatMap(_.partitions(f)))
+    if (partitions.isEmpty) {
+      getTableNames(sft, ds, None)
+    } else {
+      partitions.flatMap(p => getTableNames(sft, ds, Some(p)))
+    }
   }
 
   /**
@@ -169,11 +241,13 @@ trait GeoMesaFeatureIndex[DS <: GeoMesaDataStore[DS, F, WriteResult], F <: Wrapp
     * @param ds data store
     * @return
     */
-  protected def generateTableName(sft: SimpleFeatureType, ds: DS): String =
-    GeoMesaFeatureIndex.formatTableName(ds.config.catalog, GeoMesaFeatureIndex.tableSuffix(this), sft)
+  protected def generateTableName(sft: SimpleFeatureType, ds: DS, partition: Option[String] = None): String =
+    GeoMesaFeatureIndex.formatTableName(ds.config.catalog, GeoMesaFeatureIndex.tableSuffix(this, partition), sft)
 }
 
 object GeoMesaFeatureIndex {
+
+  import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 
   // only alphanumeric is safe
   private val SAFE_FEATURE_NAME_PATTERN = "^[a-zA-Z0-9]+$"
@@ -186,7 +260,6 @@ object GeoMesaFeatureIndex {
     * but still human readable.
     */
   def formatTableName(catalog: String, suffix: String, sft: SimpleFeatureType): String = {
-    import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
     if (sft.isTableSharing) {
       formatSharedTableName(catalog, suffix)
     } else {
@@ -200,8 +273,10 @@ object GeoMesaFeatureIndex {
   def formatSharedTableName(prefix: String, suffix: String): String =
     concatenate(prefix, suffix)
 
-  def tableSuffix(index: GeoMesaFeatureIndex[_, _, _]): String =
-    if (index.version == 1) index.name else concatenate(index.name, s"v${index.version}")
+  def tableSuffix(index: GeoMesaFeatureIndex[_, _, _], partition: Option[String] = None): String = {
+    val base = if (index.version == 1) { index.name } else { concatenate(index.name, s"v${index.version}") }
+    partition.map(concatenate(base, _)).getOrElse(base)
+  }
 
   /**
     * Format a table name for the shared tables
@@ -231,4 +306,42 @@ object GeoMesaFeatureIndex {
       sb.toString()
     }
   }
+
+  /**
+    * Converts a feature id to bytes, for indexing or querying
+    *
+    * @param sft simple feature type
+    * @return
+    */
+  def idToBytes(sft: SimpleFeatureType): String => Array[Byte] =
+    if (sft.isUuidEncoded) { uuidToBytes } else { stringToBytes }
+
+  /**
+    * Converts a byte array to a feature id. Return method takes an optional (null accepted) simple feature,
+    * which will be used to cache the parsed feature ID if it is a UUID.
+    *
+    * @param sft simple feature type
+    * @return (bytes, offset, length, SimpleFeature) => id
+    */
+  def idFromBytes(sft: SimpleFeatureType): (Array[Byte], Int, Int, SimpleFeature) => String =
+    if (sft.isUuidEncoded) { uuidFromBytes } else { stringFromBytes }
+
+  private def uuidToBytes(id: String): Array[Byte] = {
+    val uuid = UUID.fromString(id)
+    ByteArrays.uuidToBytes(uuid.getMostSignificantBits, uuid.getLeastSignificantBits)
+  }
+
+  private def uuidFromBytes(bytes: Array[Byte], offset: Int, ignored: Int, sf: SimpleFeature): String = {
+    import org.locationtech.geomesa.utils.geotools.Conversions.RichSimpleFeature
+    val uuid = ByteArrays.uuidFromBytes(bytes, offset)
+    if (sf != null) {
+      sf.cacheUuid(uuid)
+    }
+    new UUID(uuid._1, uuid._2).toString
+  }
+
+  private def stringToBytes(id: String): Array[Byte] = id.getBytes(StandardCharsets.UTF_8)
+
+  private def stringFromBytes(bytes: Array[Byte], offset: Int, length: Int, ignored: SimpleFeature): String =
+    new String(bytes, offset, length, StandardCharsets.UTF_8)
 }

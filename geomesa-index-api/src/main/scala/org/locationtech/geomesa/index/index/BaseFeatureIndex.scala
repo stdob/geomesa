@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,66 +8,96 @@
 
 package org.locationtech.geomesa.index.index
 
-import java.nio.charset.StandardCharsets
-
-import com.google.common.primitives.Bytes
 import com.typesafe.scalalogging.LazyLogging
 import org.geotools.factory.Hints
 import org.locationtech.geomesa.filter._
 import org.locationtech.geomesa.index.api.{FilterStrategy, GeoMesaFeatureIndex, QueryPlan, WrappedFeature}
+import org.locationtech.geomesa.index.conf.QueryProperties
+import org.locationtech.geomesa.index.conf.splitter.TableSplitter
 import org.locationtech.geomesa.index.geotools.GeoMesaDataStore
-import org.locationtech.geomesa.index.utils.{Explainer, SplitArrays}
+import org.locationtech.geomesa.index.index.IndexKeySpace._
+import org.locationtech.geomesa.index.utils.Explainer
+import org.locationtech.geomesa.utils.index.ByteArrays
 import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
+import org.opengis.filter.Filter
 
 /**
   * Base feature index that consists of an optional table sharing, a configurable shard, an index key,
   * and the feature id
   */
-trait BaseFeatureIndex[DS <: GeoMesaDataStore[DS, F, W], F <: WrappedFeature, W, R, C, K]
+trait BaseFeatureIndex[DS <: GeoMesaDataStore[DS, F, W], F <: WrappedFeature, W, R, C, V, K]
     extends GeoMesaFeatureIndex[DS, F, W] with IndexAdapter[DS, F, W, R, C] with LazyLogging {
 
   import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 
-  protected def keySpace: IndexKeySpace[K]
+  /**
+    * Primary key space used by this index
+    *
+    * @return
+    */
+  protected def keySpace: IndexKeySpace[V, K]
+
+  /**
+    * Strategy for sharding - defaults to using z-shard config
+    *
+    * @param sft simple feature type
+    * @return
+    */
+  protected def shardStrategy(sft: SimpleFeatureType): ShardStrategy
+
+  /**
+    * Hook to modify the scan config based on the index values extracted during range planning
+    *
+    * @param sft simple feature type
+    * @param config base scan config
+    * @param indexValues index values extracted during range planning
+    * @return
+    */
+  protected def updateScanConfig(sft: SimpleFeatureType, config: C, indexValues: Option[V]): C = config
 
   override def supports(sft: SimpleFeatureType): Boolean = keySpace.supports(sft)
 
-  override def writer(sft: SimpleFeatureType, ds: DS): (F) => Seq[W] = {
+  override def writer(sft: SimpleFeatureType, ds: DS): F => Seq[W] = {
     val sharing = sft.getTableSharingBytes
-    val shards = SplitArrays(sft)
-    val toIndexKey = keySpace.toIndexKey(sft)
-    (wf) => Seq(createInsert(getRowKey(sharing, shards, toIndexKey, wf), wf))
+    val shards = shardStrategy(sft)
+    val toIndexKey = keySpace.toIndexKeyBytes(sft)
+    mutator(sharing, shards, toIndexKey, createInsert)
   }
 
-  override def remover(sft: SimpleFeatureType, ds: DS): (F) => Seq[W] = {
+  override def remover(sft: SimpleFeatureType, ds: DS): F => Seq[W] = {
     val sharing = sft.getTableSharingBytes
-    val shards = SplitArrays(sft)
-    val toIndexKey = keySpace.toIndexKey(sft, lenient = true)
-    (wf) => Seq(createDelete(getRowKey(sharing, shards, toIndexKey, wf), wf))
+    val shards = shardStrategy(sft)
+    val toIndexKey = keySpace.toIndexKeyBytes(sft, lenient = true)
+    mutator(sharing, shards, toIndexKey, createDelete)
   }
 
-  private def getRowKey(sharing: Array[Byte],
-                        shards: IndexedSeq[Array[Byte]],
-                        toIndexKey: (SimpleFeature) => Array[Byte],
-                        wrapper: F): Array[Byte] = {
-    val split = shards(wrapper.idHash % shards.length)
-    val indexKey = toIndexKey(wrapper.feature)
-    Bytes.concat(sharing, split, indexKey, wrapper.idBytes)
+  override def getIdFromRow(sft: SimpleFeatureType): (Array[Byte], Int, Int, SimpleFeature) => String = {
+    val sharing = if (sft.isTableSharing) { 1 } else { 0 }
+    val shards = if (shardStrategy(sft).shards.isEmpty) { 0 } else { 1 }
+    val start = sharing + shards + keySpace.indexKeyByteLength
+    val idFromBytes = GeoMesaFeatureIndex.idFromBytes(sft)
+    (row, offset, length, feature) => idFromBytes(row, offset + start, length - start, feature)
   }
 
-  override def getIdFromRow(sft: SimpleFeatureType): (Array[Byte], Int, Int) => String = {
-    val start = keySpace.indexKeyLength + (if (sft.isTableSharing) { 2 } else { 1 }) // key + table sharing + shard
-    (row, offset, length) => new String(row, offset + start, length - start, StandardCharsets.UTF_8)
-  }
-
-  override def getSplits(sft: SimpleFeatureType): Seq[Array[Byte]] = {
+  override def getSplits(sft: SimpleFeatureType, partition: Option[String]): Seq[Array[Byte]] = {
     import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
-    val splits = SplitArrays(sft).drop(1) // drop the first so we don't get an empty tablet
-    if (sft.isTableSharing) {
-      val sharing = sft.getTableSharingBytes
-      splits.map(s => Bytes.concat(sharing, s))
+
+    def nonEmpty(bytes: Seq[Array[Byte]]): Seq[Array[Byte]] = if (bytes.nonEmpty) { bytes } else { Seq(Array.empty) }
+
+    val sharing = sft.getTableSharingBytes
+    val shards = nonEmpty(shardStrategy(sft).shards)
+
+    val splits = nonEmpty(TableSplitter.getSplits(sft, name, partition))
+
+    val result = for (shard <- shards; split <- splits) yield {
+      ByteArrays.concat(sharing, shard, split)
+    }
+
+    // if not sharing, or the first feature in the table, drop the first split, which will otherwise be empty
+    if (sharing.isEmpty || sharing.head == 0.toByte) {
+      result.drop(1)
     } else {
-      splits
+      result
     }
   }
 
@@ -82,29 +112,47 @@ trait BaseFeatureIndex[DS <: GeoMesaDataStore[DS, F, W], F <: WrappedFeature, W,
 
     val ranges = indexValues match {
       case None =>
+        // check that full table scans are allowed
+        QueryProperties.BlockFullTableScans.onFullTableScan(sft.getTypeName, filter.filter.getOrElse(Filter.INCLUDE))
         filter.secondary.foreach { f =>
-          logger.warn(s"Running full table scan for schema ${sft.getTypeName} with filter ${filterToString(f)}")
+          logger.warn(s"Running full table scan on $name index for schema ${sft.getTypeName} with filter ${filterToString(f)}")
         }
-        Seq(rangePrefix(sharing))
+        Iterator.single(createRange(sharing, ByteArrays.rowFollowingPrefix(sharing)))
 
       case Some(values) =>
-        val splits = SplitArrays(sft)
-        val prefixes = if (sharing.length == 0) { splits } else { splits.map(Bytes.concat(sharing, _)) }
-        keySpace.getRanges(sft, values).flatMap { case (s, e) =>
-          prefixes.map(p => range(Bytes.concat(p, s), Bytes.concat(p, e)))
-        }.toSeq
+        val prefixes = (shardStrategy(sft).shards, sharing) match {
+          case (shards, Array()) => shards
+          case (Seq(), share)    => Seq(share)
+          case (shards, share)   => shards.map(ByteArrays.concat(share, _))
+        }
+        keySpace.getRangeBytes(keySpace.getRanges(values), prefixes).map {
+          case BoundedByteRange(lo, hi) => createRange(lo, hi)
+          case SingleRowByteRange(row)  => createRange(row)
+          case r => throw new IllegalArgumentException(s"Unexpected range type $r")
+        }
     }
 
-    val ecql = if (useFullFilter(sft, ds, filter, indexValues, hints)) { filter.filter } else { filter.secondary }
-    val config = updateScanConfig(sft, scanConfig(sft, ds, filter, ranges, ecql, hints), indexValues)
+    val useFullFilter = keySpace.useFullFilter(indexValues, Some(ds.config), hints)
+    val ecql = if (useFullFilter) { filter.filter } else { filter.secondary }
+    val config = updateScanConfig(sft, scanConfig(sft, ds, filter, ranges.toSeq, ecql, hints), indexValues)
     scanPlan(sft, ds, filter, config)
   }
 
-  protected def updateScanConfig(sft: SimpleFeatureType, config: C, indexValues: Option[K]): C = config
-
-  protected def useFullFilter(sft: SimpleFeatureType,
-                              ds: DS,
-                              filter: FilterStrategy[DS, F, W],
-                              indexValues: Option[K],
-                              hints: Hints): Boolean
+  /**
+    * Mutator for a single key space
+    *
+    * @param sharing table sharing bytes
+    * @param shards sharding
+    * @param toIndexKey function to create the primary index key
+    * @param operation operation (create or delete)
+    * @param feature feature to operate on
+    * @return
+    */
+  private def mutator(sharing: Array[Byte],
+                      shards: ShardStrategy,
+                      toIndexKey: (Seq[Array[Byte]], SimpleFeature, Array[Byte]) => Seq[Array[Byte]],
+                      operation: (Array[Byte], F) => W)
+                     (feature: F): Seq[W] = {
+    toIndexKey(Seq(sharing, shards(feature)), feature.feature, feature.idBytes).map(operation.apply(_, feature))
+  }
 }

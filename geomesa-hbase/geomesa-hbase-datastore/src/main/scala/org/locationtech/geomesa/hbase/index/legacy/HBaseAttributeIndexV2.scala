@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,7 +8,7 @@
 
 package org.locationtech.geomesa.hbase.index.legacy
 
-import org.apache.hadoop.hbase.client.{Mutation, Query}
+import org.apache.hadoop.hbase.client.{Mutation, Scan}
 import org.locationtech.geomesa.hbase.data.{HBaseDataStore, HBaseFeature}
 import org.locationtech.geomesa.hbase.index.HBaseIndexAdapter.ScanConfig
 import org.locationtech.geomesa.hbase.index.{HBaseFeatureIndex, HBasePlatform}
@@ -20,7 +20,7 @@ case object HBaseAttributeIndexV2 extends HBaseLikeAttributeIndexV2 with HBasePl
 
 // no shards
 trait HBaseLikeAttributeIndexV2 extends HBaseFeatureIndex
-    with AttributeZIndex[HBaseDataStore, HBaseFeature, Mutation, Query, ScanConfig] {
+    with AttributeZIndex[HBaseDataStore, HBaseFeature, Mutation, Scan, ScanConfig] {
   override val version: Int = 2
   override protected def getShards(sft: SimpleFeatureType): IndexedSeq[Array[Byte]] = SplitArrays.EmptySplits
 }

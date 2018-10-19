@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -42,10 +42,25 @@ class ScalaSimpleFeature(sft: SimpleFeatureType,
 
 object ScalaSimpleFeature {
 
+  import org.locationtech.geomesa.utils.conversions.ScalaImplicits.RichTraversableOnce
+
+  import scala.collection.JavaConverters._
+
   def copy(in: SimpleFeature): ScalaSimpleFeature = copy(in.getFeatureType, in)
 
   def copy(sft: SimpleFeatureType, in: SimpleFeature): ScalaSimpleFeature =
     new ScalaSimpleFeature(sft, in.getID, in.getAttributes.toArray, new java.util.HashMap[AnyRef, AnyRef](in.getUserData))
+
+  def retype(sft: SimpleFeatureType, in: SimpleFeature): SimpleFeature = {
+    if (sft == in.getFeatureType) { in } else {
+      val out = new ScalaSimpleFeature(sft, in.getID)
+      sft.getAttributeDescriptors.asScala.foreachIndex { case (d, i) =>
+        out.setAttributeNoConvert(i, in.getAttribute(d.getLocalName))
+      }
+      out.getUserData.putAll(in.getUserData)
+      out
+    }
+  }
 
   @deprecated("use copy")
   def create(sft: SimpleFeatureType, in: SimpleFeature): ScalaSimpleFeature = copy(sft, in)

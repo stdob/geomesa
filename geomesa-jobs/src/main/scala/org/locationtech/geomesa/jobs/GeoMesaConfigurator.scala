@@ -1,6 +1,6 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
- * Portions Crown Copyright (c) 2017 Dstl
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
+ * Portions Crown Copyright (c) 2017-2018 Dstl
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -9,6 +9,7 @@
 
 package org.locationtech.geomesa.jobs
 
+import org.apache.commons.csv.{CSVFormat, CSVParser, CSVPrinter}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.io.serializer.WritableSerialization
 import org.apache.hadoop.mapreduce.Job
@@ -39,6 +40,7 @@ object GeoMesaConfigurator {
   private val tableKey         = s"$prefix.table"
   private val transformsKey    = s"$prefix.transforms.schema"
   private val transformNameKey = s"$prefix.transforms.name"
+  private val propertiesKey    = s"$prefix.transforms.props"
   private val indexInKey       = s"$prefix.in.indices"
   private val sftKeyOut        = s"$prefix.out.sft"
   private val indicesOutKey    = s"$prefix.out.indices"
@@ -121,6 +123,22 @@ object GeoMesaConfigurator {
       transformSchema <- Option(conf.get(transformsKey))
     } yield {
       SimpleFeatureTypes.createType(transformName, transformSchema)
+    }
+
+  def setPropertyNames(conf: Configuration, properties: Array[String]): Unit = {
+    if (properties != null) {
+      val sb = new java.lang.StringBuilder
+      val printer = new CSVPrinter(sb, CSVFormat.DEFAULT)
+      properties.foreach(printer.print)
+      conf.set(propertiesKey, sb.toString)
+    }
+  }
+  def getPropertyNames(job: Job): Option[Array[String]] = getPropertyNames(job.getConfiguration)
+  def getPropertyNames(conf: Configuration): Option[Array[String]] =
+    Option(conf.get(propertiesKey)).flatMap { strings =>
+      val parser = CSVParser.parse(strings, CSVFormat.DEFAULT)
+      val iter = parser.iterator
+      if (iter.hasNext) { Some(iter.next.iterator.toArray[String]) } else { None }
     }
 
   // add our simple feature serialization to the config

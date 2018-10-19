@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -20,12 +20,11 @@ import org.locationtech.geomesa.accumulo.index._
 import org.locationtech.geomesa.index.utils.ExplainString
 import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes
-import org.locationtech.geomesa.utils.index.IndexMode
 import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 import org.opengis.filter.Filter
 import org.opengis.filter.identity.FeatureId
 import org.specs2.mutable.Specification
-import org.specs2.specification.{Fragments, Step}
+import org.specs2.specification.core.Fragments
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
@@ -52,10 +51,10 @@ trait TestWithMultipleSfts extends Specification {
   val ds = DataStoreFinder.getDataStore(dsParams.asJava).asInstanceOf[AccumuloDataStore]
 
   // after all tests, drop the tables we created to free up memory
-  override def map(fragments: => Fragments) = fragments ^ Step {
+  override def map(fragments: => Fragments): Fragments = fragments ^ fragmentFactory.step {
     val to = connector.tableOperations()
     val tables = Seq(sftBaseName) ++ sfts.flatMap { sft =>
-      Try(AccumuloFeatureIndex.indices(sft, IndexMode.Any).map(_.getTableName(sft.getTypeName, ds))).getOrElse(Seq.empty)
+      Try(AccumuloFeatureIndex.indices(sft).flatMap(_.getTableNames(sft, ds))).getOrElse(Seq.empty)
     }
     tables.toSet.filter(to.exists).foreach(to.delete)
     ds.dispose()

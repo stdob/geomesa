@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,13 +8,13 @@
 
 package org.locationtech.geomesa.filter
 
-import java.util.Date
+import java.time.{ZoneOffset, ZonedDateTime}
+import java.util.{Date, Locale}
 
 import com.typesafe.scalalogging.LazyLogging
 import com.vividsolutions.jts.geom._
 import org.geotools.data.DataUtilities
 import org.geotools.filter.spatial.BBOXImpl
-import org.joda.time.{DateTime, DateTimeZone}
 import org.locationtech.geomesa.filter.Bounds.Bound
 import org.locationtech.geomesa.filter.expression.AttributeExpression.{FunctionLiteral, PropertyLiteral}
 import org.locationtech.geomesa.filter.visitor.IdDetectingFilterVisitor
@@ -23,7 +23,7 @@ import org.locationtech.geomesa.utils.geotools.GeometryUtils
 import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 import org.opengis.feature.simple.SimpleFeatureType
 import org.opengis.filter._
-import org.opengis.filter.expression.PropertyName
+import org.opengis.filter.expression.{Expression, PropertyName}
 import org.opengis.filter.spatial._
 import org.opengis.filter.temporal.{After, Before, During, TEquals}
 import org.opengis.temporal.Period
@@ -34,7 +34,7 @@ import scala.util.{Failure, Success}
 
 object FilterHelper {
 
-  import org.locationtech.geomesa.utils.geotools.GeometryUtils.{geoFactory => gf}
+  import org.locationtech.geomesa.utils.geotools.GeometryUtils.distanceDegrees
   import org.locationtech.geomesa.utils.geotools.WholeWorldPolygon
 
   private val SafeGeomString = "gm-safe"
@@ -51,67 +51,32 @@ object FilterHelper {
     * @param sft simple feature type
     * @return valid op
     */
-  def visitBinarySpatialOp(op: BinarySpatialOperator, sft: SimpleFeatureType): Filter = {
+  def visitBinarySpatialOp(op: BinarySpatialOperator, sft: SimpleFeatureType, factory: FilterFactory2): Filter = {
     val prop = org.locationtech.geomesa.filter.checkOrderUnsafe(op.getExpression1, op.getExpression2)
     val geom = prop.literal.evaluate(null, classOf[Geometry])
     if (geom.getUserData == SafeGeomString) {
       op // we've already visited this geom once
     } else {
       // check for null or empty attribute and replace with default geometry name
-      val attribute = Option(prop.name).filterNot(_.isEmpty).getOrElse(if (sft == null) null else sft.getGeomField)
+      val attribute = Option(prop.name).filterNot(_.isEmpty).orElse(Option(sft).map(_.getGeomField)).orNull
       // copy the geometry so we don't modify the original
-      val geomCopy = gf.createGeometry(geom)
+      val geomCopy = geom.getFactory.createGeometry(geom)
       // trim to world boundaries
       val trimmedGeom = geomCopy.intersection(WholeWorldPolygon)
       if (trimmedGeom.isEmpty) {
         Filter.EXCLUDE
       } else {
         // add waypoints if needed so that IDL is handled correctly
-        val geomWithWayPoints = if (op.isInstanceOf[BBOX]) addWayPointsToBBOX(trimmedGeom) else trimmedGeom
-        val safeGeometry = tryGetIdlSafeGeom(geomWithWayPoints)
+        val geomWithWayPoints = if (op.isInstanceOf[BBOX]) { addWayPointsToBBOX(trimmedGeom) } else { trimmedGeom }
+        val safeGeometries = flattenGeometry(tryGetIdlSafeGeom(geomWithWayPoints))
         // mark it as being visited
-        safeGeometry.setUserData(SafeGeomString)
-        recreateAsIdlSafeFilter(op, attribute, safeGeometry, prop.flipped)
+        safeGeometries.foreach(_.setUserData(SafeGeomString))
+        val args: Array[Any] = op match {
+          case dwithin: DWithin => Array(dwithin.getDistance, dwithin.getDistanceUnits)
+          case _ => null
+        }
+        orFilters(safeGeometries.map(recreateFilter(op, attribute, _, prop.flipped, factory, args)))(factory)
       }
-    }
-  }
-
-  /**
-    * Creates a new filter with valid bounds and attributes. Distance will be converted into degrees.
-    * Note: units will still refer to 'meters', but that is due to ECQL issues
-    *
-    * @param op dwithin
-    * @param sft simple feature type
-    * @return valid dwithin
-    */
-  def visitDwithin(op: DWithin, sft: SimpleFeatureType): Filter = {
-    val prop = org.locationtech.geomesa.filter.checkOrderUnsafe(op.getExpression1, op.getExpression2)
-    val geom = prop.literal.evaluate(null, classOf[Geometry])
-    if (geom.getUserData == SafeGeomString) {
-      op // we've already visited this geom once
-    } else {
-      val units = Option(op.getDistanceUnits).map(_.trim).filter(_.nonEmpty).map(_.toLowerCase).getOrElse("meters")
-      val multiplier = units match {
-        case "meters"         => 1.0
-        case "kilometers"     => 1000.0
-        case "feet"           => 0.3048
-        case "statute miles"  => 1609.347
-        case "nautical miles" => 1852.0
-        case _                => 1.0 // not part of ECQL spec...
-      }
-      val distanceMeters = op.getDistance * multiplier
-      val distanceDegrees = GeometryUtils.distanceDegrees(geom, distanceMeters)
-
-      // check for null or empty attribute and replace with default geometry name
-      val attribute = Option(prop.name).filterNot(_.isEmpty).getOrElse(if (sft == null) null else sft.getGeomField)
-      // copy the geometry so we don't modify the original
-      val geomCopy = gf.createGeometry(geom)
-      // trim to world boundaries
-      val trimmedGeom = geomCopy.intersection(WholeWorldPolygon)
-      val safeGeometry = tryGetIdlSafeGeom(trimmedGeom)
-      // mark it as being visited
-      safeGeometry.setUserData(SafeGeomString)
-      recreateAsIdlSafeFilter(op, attribute, safeGeometry, prop.flipped, distanceDegrees)
     }
   }
 
@@ -120,37 +85,25 @@ object FilterHelper {
     case Failure(e) => FilterHelperLogger.log.warn(s"Error splitting geometry on IDL for $geom", e); geom
   }
 
-  private def recreateAsIdlSafeFilter(op: BinarySpatialOperator,
-                                      property: String,
-                                      geom: Geometry,
-                                      flipped: Boolean,
-                                      args: Any = null): Filter = {
-    geom match {
-      case g: GeometryCollection =>
-        // geometry collections are OR'd together
-        val asList = getGeometryListOf(g)
-        asList.foreach(_.setUserData(geom.getUserData))
-        ff.or(asList.map(recreateFilter(op, property, _, flipped, args)))
-      case _ => recreateFilter(op, property, geom, flipped, args)
-    }
-  }
-
   private def recreateFilter(op: BinarySpatialOperator,
                              property: String,
                              geom: Geometry,
                              flipped: Boolean,
-                             args: Any): Filter = {
-    val (e1, e2) = if (flipped) (ff.literal(geom), ff.property(property)) else (ff.property(property), ff.literal(geom))
+                             factory: FilterFactory2,
+                             args: Array[Any]): Filter = {
+    val (e1, e2) = if (flipped) {
+      (factory.literal(geom), factory.property(property))
+    } else {
+      (factory.property(property), factory.literal(geom))
+    }
     op match {
-      case _: Within     => ff.within(e1, e2)
-      case _: Intersects => ff.intersects(e1, e2)
-      case _: Overlaps   => ff.overlaps(e1, e2)
-      // note: The ECQL spec doesn't allow for us to put the measurement
-      // in "degrees", but that's how this filter will be used.
-      case _: DWithin    => ff.dwithin(e1, e2, args.asInstanceOf[Double], "meters")
+      case _: Within     => factory.within(e1, e2)
+      case _: Intersects => factory.intersects(e1, e2)
+      case _: Overlaps   => factory.overlaps(e1, e2)
+      case _: DWithin    => factory.dwithin(e1, e2, args(0).asInstanceOf[Double], args(1).asInstanceOf[String])
       // use the direct constructor so that we preserve our geom user data
       case _: BBOX       => new BBOXImpl(e1, e2)
-      case _: Contains   => ff.contains(e1, e2)
+      case _: Contains   => factory.contains(e1, e2)
     }
   }
 
@@ -179,14 +132,10 @@ object FilterHelper {
 
   def isWholeWorld[G <: Geometry](g: G): Boolean = g != null && g.union.covers(WholeWorldPolygon)
 
-  def getGeometryListOf(inMP: Geometry): Seq[Geometry] =
-    for( i <- 0 until inMP.getNumGeometries ) yield inMP.getGeometryN(i)
-
   def addWayPointsToBBOX(g: Geometry): Geometry = {
-    val gf = g.getFactory
     val geomArray = g.getCoordinates
     val correctedGeom = GeometryUtils.addWayPoints(geomArray).toArray
-    if (geomArray.length == correctedGeom.length) g else gf.createPolygon(correctedGeom)
+    if (geomArray.length == correctedGeom.length) { g } else { g.getFactory.createPolygon(correctedGeom) }
   }
 
   /**
@@ -233,13 +182,9 @@ object FilterHelper {
           geom <- Option(prop.literal.evaluate(null, classOf[Geometry]))
         } yield {
           val buffered = filter match {
-            // note: the dwithin should have already between rewritten
-            case dwithin: DWithin => geom.buffer(dwithin.getDistance)
-            case _: BBOX =>
-              val geomCopy = gf.createGeometry(geom)
-              val trimmedGeom = geomCopy.intersection(WholeWorldPolygon)
-              addWayPointsToBBOX(trimmedGeom)
-            case _ => geom
+            case f: DWithin => geom.buffer(distanceDegrees(geom, f.getDistance * metersMultiplier(f.getDistanceUnits))._2)
+            case _: BBOX    => addWayPointsToBBOX(geom.getFactory.createGeometry(geom).intersection(WholeWorldPolygon))
+            case _          => geom
           }
           tryGetIdlSafeGeom(buffered)
         }
@@ -249,8 +194,21 @@ object FilterHelper {
     }
   }
 
+  def metersMultiplier(units: String): Double = {
+    if (units == null) { 1d } else {
+      units.trim.toLowerCase(Locale.US) match {
+        case "meters"         => 1d
+        case "kilometers"     => 1000d
+        case "feet"           => 0.3048
+        case "statute miles"  => 1609.347
+        case "nautical miles" => 1852d
+        case _                => 1d // not part of ECQL spec...
+      }
+    }
+  }
+
   private def flattenGeometry(geometry: Geometry): Seq[Geometry] = geometry match {
-    case g: GeometryCollection => (0 until g.getNumGeometries).map(g.getGeometryN).flatMap(flattenGeometry)
+    case g: GeometryCollection => Seq.tabulate(g.getNumGeometries)(g.getGeometryN).flatMap(flattenGeometry)
     case _ => Seq(geometry)
   }
 
@@ -267,9 +225,9 @@ object FilterHelper {
   def extractIntervals(filter: Filter,
                        attribute: String,
                        intersect: Boolean = true,
-                       handleExclusiveBounds: Boolean = false): FilterValues[Bounds[DateTime]] = {
+                       handleExclusiveBounds: Boolean = false): FilterValues[Bounds[ZonedDateTime]] = {
     extractAttributeBounds(filter, attribute, classOf[Date]).map { bounds =>
-      var lower, upper: Bound[DateTime] = null
+      var lower, upper: Bound[ZonedDateTime] = null
       if (!handleExclusiveBounds || bounds.lower.value.isEmpty || bounds.upper.value.isEmpty ||
           (bounds.lower.inclusive && bounds.upper.inclusive)) {
         lower = createDateTime(bounds.lower, roundSecondsUp, handleExclusiveBounds)
@@ -287,10 +245,10 @@ object FilterHelper {
   }
 
   private def createDateTime(bound: Bound[Date],
-                             round: (DateTime) => DateTime,
-                             roundExclusive: Boolean): Bound[DateTime] = {
+                             round: (ZonedDateTime) => ZonedDateTime,
+                             roundExclusive: Boolean): Bound[ZonedDateTime] = {
     if (bound.value.isEmpty) { Bound.unbounded } else {
-      val dt = bound.value.map(new DateTime(_, DateTimeZone.UTC))
+      val dt = bound.value.map(d => ZonedDateTime.ofInstant(d.toInstant, ZoneOffset.UTC))
       if (roundExclusive && !bound.inclusive) {
         Bound(dt.map(round), inclusive = true)
       } else {
@@ -299,11 +257,11 @@ object FilterHelper {
     }
   }
 
-  private def roundSecondsUp(dt: DateTime): DateTime = dt.plusSeconds(1).withMillisOfSecond(0)
+  private def roundSecondsUp(dt: ZonedDateTime): ZonedDateTime = dt.plusSeconds(1).withNano(0)
 
-  private def roundSecondsDown(dt: DateTime): DateTime = {
-    val millis = dt.getMillisOfSecond
-    if (millis == 0) dt.minusSeconds(1) else dt.withMillisOfSecond(0)
+  private def roundSecondsDown(dt: ZonedDateTime): ZonedDateTime = {
+    val nanos = dt.getNano
+    if (nanos == 0) { dt.minusSeconds(1) } else { dt.withNano(0) }
   }
 
   /**
@@ -529,7 +487,10 @@ object FilterHelper {
   }
 
   def propertyNames(filter: Filter, sft: SimpleFeatureType): Seq[String] =
-    DataUtilities.attributeNames(filter, sft).toSeq.sorted
+    DataUtilities.attributeNames(filter, sft).toSeq.distinct.sorted
+
+  def propertyNames(expression: Expression, sft: SimpleFeatureType): Seq[String] =
+    DataUtilities.attributeNames(expression, sft).toSeq.distinct.sorted
 
   def hasIdFilter(filter: Filter): Boolean =
     filter.accept(new IdDetectingFilterVisitor, false).asInstanceOf[Boolean]
@@ -586,7 +547,7 @@ object FilterHelper {
     }
   }
 
-  private def flattenAnd(filters: Seq[Filter]): ListBuffer[Filter] = {
+  private [filter] def flattenAnd(filters: Seq[Filter]): ListBuffer[Filter] = {
     val remaining = ListBuffer.empty[Filter] ++ filters
     val result = ListBuffer.empty[Filter]
     do {
@@ -598,7 +559,7 @@ object FilterHelper {
     result
   }
 
-  private def flattenOr(filters: Seq[Filter]): ListBuffer[Filter] = {
+  private [filter] def flattenOr(filters: Seq[Filter]): ListBuffer[Filter] = {
     val remaining = ListBuffer.empty[Filter] ++ filters
     val result = ListBuffer.empty[Filter]
     do {

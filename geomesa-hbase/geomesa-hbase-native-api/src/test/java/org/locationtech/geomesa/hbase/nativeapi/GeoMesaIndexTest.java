@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -36,6 +36,7 @@ import org.opengis.feature.type.AttributeDescriptor;
 import org.opengis.filter.FilterFactory2;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import scala.Option$;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
@@ -342,10 +343,10 @@ public class GeoMesaIndexTest {
 
         // require that the function to pre-compute the names of all tables for this feature type is accurate
         scala.collection.Iterator<HBaseFeatureIndex> indices =
-                HBaseFeatureIndex$.MODULE$.indices(ds.getSchema(featureName), IndexMode$.MODULE$.Any()).iterator();
+                HBaseFeatureIndex$.MODULE$.indices(ds.getSchema(featureName), scala.Option.apply(null), IndexMode$.MODULE$.Any()).iterator();
         List<String> expectedTables = new ArrayList<>();
         while (indices.hasNext()) {
-            expectedTables.add(indices.next().getTableName(featureName, ds));
+            expectedTables.add(indices.next().getTableNames(ds.getSchema(featureName), ds, Option$.MODULE$.empty()).head());
         }
         expectedTables.add(featureName);
 

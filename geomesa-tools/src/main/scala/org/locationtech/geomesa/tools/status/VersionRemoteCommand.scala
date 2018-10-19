@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -24,12 +24,8 @@ trait VersionRemoteCommand[DS <: GeoMesaDataStore[_, _, _]] extends DataStoreCom
     Command.output.info(s"Local Branch: $GitBranch")
     Command.output.info(s"Local Build date: $BuildDate")
     try {
-      val iterVersions = withDataStore(_.getVersion._2)
-      Command.output.info(s"Distributed runtime version${ if (iterVersions.size > 1) "s" else "" }: " +
-          iterVersions.mkString(", "))
-      if (iterVersions.size > 1) {
-        Command.output.warn("WARNING: multiple iterator versions detected, check your cluster installation")
-      }
+      val iterVersion = withDataStore(_.getDistributeVersion.map(_.toString))
+      Command.output.info(s"Distributed runtime version: ${iterVersion.getOrElse("unknown")}")
     } catch {
       case NonFatal(e) => Command.user.error("Could not get distributed version:", e)
     }

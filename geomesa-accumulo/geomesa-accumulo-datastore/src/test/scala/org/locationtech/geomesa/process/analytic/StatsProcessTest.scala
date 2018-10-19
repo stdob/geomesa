@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -13,11 +13,10 @@ import java.util.Collections
 import org.geotools.data.Query
 import org.geotools.feature.DefaultFeatureCollection
 import org.geotools.filter.text.ecql.ECQL
-import org.joda.time.{DateTime, DateTimeZone}
 import org.junit.runner.RunWith
 import org.locationtech.geomesa.accumulo.TestWithDataStore
 import org.locationtech.geomesa.features.ScalaSimpleFeature
-import org.locationtech.geomesa.index.utils.KryoLazyStatsUtils
+import org.locationtech.geomesa.index.iterators.StatsScan
 import org.locationtech.geomesa.utils.collection.SelfClosingIterator
 import org.locationtech.geomesa.utils.stats._
 import org.opengis.filter.Filter
@@ -32,8 +31,7 @@ class StatsProcessTest extends Specification with TestWithDataStore {
   override val spec = "an_id:java.lang.Integer,attr:java.lang.Long,dtg:Date,*geom:Point:srid=4326"
 
   addFeatures((0 until 150).toArray.map { i =>
-    val attrs = Array(i.asInstanceOf[AnyRef], (i * 2).asInstanceOf[AnyRef],
-      new DateTime("2012-01-01T19:00:00", DateTimeZone.UTC).toDate, "POINT(-77 38)")
+    val attrs = Array(i.asInstanceOf[AnyRef], (i * 2).asInstanceOf[AnyRef], "2012-01-01T19:00:00Z", "POINT(-77 38)")
     val sf = new ScalaSimpleFeature(sft, i.toString)
     sf.setAttributes(attrs)
     sf
@@ -49,7 +47,7 @@ class StatsProcessTest extends Specification with TestWithDataStore {
       val results = statsIteratorProcess.execute(fs.getFeatures(query), "MinMax(attr)", encode = true)
       val sf = results.features().next
 
-      val minMaxStat = KryoLazyStatsUtils.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[MinMax[java.lang.Long]]
+      val minMaxStat = StatsScan.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[MinMax[java.lang.Long]]
       minMaxStat.bounds mustEqual (0, 298)
     }
 
@@ -57,7 +55,7 @@ class StatsProcessTest extends Specification with TestWithDataStore {
       val results = statsIteratorProcess.execute(fs.getFeatures(query), "IteratorStackCount()", encode = true)
       val sf = results.features().next
 
-      val isc = KryoLazyStatsUtils.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[IteratorStackCount]
+      val isc = StatsScan.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[IteratorStackCount]
       isc.count must beGreaterThanOrEqualTo(1L)
     }
 
@@ -65,7 +63,7 @@ class StatsProcessTest extends Specification with TestWithDataStore {
       val results = statsIteratorProcess.execute(fs.getFeatures(query), "Enumeration(an_id)", encode = true)
       val sf = results.features().next
 
-      val eh = KryoLazyStatsUtils.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[EnumerationStat[java.lang.Integer]]
+      val eh = StatsScan.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[EnumerationStat[java.lang.Integer]]
       eh.size mustEqual 150
       eh.frequency(0) mustEqual 1
       eh.frequency(149) mustEqual 1
@@ -76,7 +74,7 @@ class StatsProcessTest extends Specification with TestWithDataStore {
       val results = statsIteratorProcess.execute(fs.getFeatures(query), "Histogram(an_id,5,0,149)", encode = true)
       val sf = results.features().next
 
-      val rh = KryoLazyStatsUtils.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[Histogram[java.lang.Integer]]
+      val rh = StatsScan.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[Histogram[java.lang.Integer]]
       rh.length mustEqual 5
       forall(0 until 5)(rh.count(_) mustEqual 30)
     }
@@ -84,7 +82,7 @@ class StatsProcessTest extends Specification with TestWithDataStore {
     "work with the GroupBy stat" in {
       val results = statsIteratorProcess.execute(fs.getFeatures(query), "GroupBy(an_id,MinMax(attr))", encode = true)
       val sf = results.features().next
-      val gb = KryoLazyStatsUtils.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[GroupBy[_]]
+      val gb = StatsScan.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[GroupBy[_]]
       gb.size mustEqual 150
     }
 
@@ -92,7 +90,7 @@ class StatsProcessTest extends Specification with TestWithDataStore {
       val results = statsIteratorProcess.execute(fs.getFeatures(query), "DescriptiveStats(attr)", encode = true)
       val sf = results.features().next
 
-      val rh = KryoLazyStatsUtils.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[DescriptiveStats]
+      val rh = StatsScan.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[DescriptiveStats]
       rh.count mustEqual 150
       rh.bounds(0) mustEqual (0, 298)
       rh.mean(0) must beCloseTo(149.0, 1e-9)
@@ -117,7 +115,7 @@ class StatsProcessTest extends Specification with TestWithDataStore {
         "MinMax(attr);IteratorStackCount();Enumeration(an_id);Histogram(an_id,5,10,14)", encode = true)
       val sf = results.features().next
 
-      val seqStat = KryoLazyStatsUtils.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[SeqStat]
+      val seqStat = StatsScan.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[SeqStat]
       val stats = seqStat.stats
       stats.size mustEqual 4
 
@@ -148,7 +146,7 @@ class StatsProcessTest extends Specification with TestWithDataStore {
         "MinMax(attr);IteratorStackCount();Enumeration(an_id);Histogram(an_id,5,10,14)", encode = true)
       val sf = results.features().next
 
-      val seqStat = KryoLazyStatsUtils.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[SeqStat]
+      val seqStat = StatsScan.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[SeqStat]
       val stats = seqStat.stats
       stats.size mustEqual 4
 
@@ -194,7 +192,7 @@ class StatsProcessTest extends Specification with TestWithDataStore {
       val results = statsIteratorProcess.execute(fs.getFeatures(query), "MinMax(attr)", true)
       val sf = results.features().next
 
-      val stat = KryoLazyStatsUtils.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[MinMax[Long]]
+      val stat = StatsScan.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[MinMax[Long]]
       stat.min mustEqual(0)
       stat.max mustEqual(298)
     }
@@ -207,7 +205,7 @@ class StatsProcessTest extends Specification with TestWithDataStore {
       val results = statsIteratorProcess.execute(features, "MinMax(attr)", true)
       val sf = results.features().next
 
-      val stat = KryoLazyStatsUtils.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[MinMax[Long]]
+      val stat = StatsScan.decodeStat(sft)(sf.getAttribute(0).asInstanceOf[String]).asInstanceOf[MinMax[Long]]
       stat.min mustEqual(0)
       stat.max mustEqual(298)
     }

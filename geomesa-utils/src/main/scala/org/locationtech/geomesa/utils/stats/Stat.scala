@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -14,14 +14,14 @@ import java.util.Date
 
 import com.google.gson._
 import com.vividsolutions.jts.geom.Geometry
-import org.apache.commons.lang.StringEscapeUtils
+import org.apache.commons.text.StringEscapeUtils
 import org.locationtech.geomesa.curve.TimePeriod.TimePeriod
 import org.locationtech.geomesa.utils.geotools._
 import org.locationtech.geomesa.utils.text.WKTUtils
 import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 
-import scala.reflect.ClassTag
 import scala.collection.JavaConverters._
+import scala.reflect.ClassTag
 
 /**
  * Stats used by the StatsIterator to compute various statistics server-side for a given query.
@@ -29,6 +29,13 @@ import scala.collection.JavaConverters._
 trait Stat {
 
   type S <: Stat
+
+  /**
+    * The simple feature type that this stat operates on
+    *
+    * @return
+    */
+  def sft: SimpleFeatureType
 
   /**
    * Compute statistics based upon the given simple feature.
@@ -128,43 +135,43 @@ trait Stat {
  */
 object Stat {
 
-  val ScalaMapSerializer = new JsonSerializer[Map[Any,Any]] {
+  private val ScalaMapSerializer = new JsonSerializer[Map[Any,Any]] {
     def serialize(s: Map[Any,Any], t: Type, jsc: JsonSerializationContext): JsonElement = jsc.serialize(s.asJava)
   }
-  val ScalaSeqSerializer = new JsonSerializer[Seq[Any]] {
+  private val ScalaSeqSerializer = new JsonSerializer[Seq[Any]] {
     def serialize(s: Seq[Any], t: Type, jsc: JsonSerializationContext): JsonElement = jsc.serialize(s.asJava)
   }
-  val StatSerializer = new JsonSerializer[Stat] {
+  private val StatSerializer = new JsonSerializer[Stat] {
     def serialize(s: Stat, t: Type, jsc: JsonSerializationContext): JsonElement = jsc.serialize(s.toJsonObject)
   }
-  val GeometrySerializer = new JsonSerializer[Geometry] {
+  private val GeometrySerializer = new JsonSerializer[Geometry] {
     def serialize(g: Geometry, t: Type, jsc: JsonSerializationContext): JsonElement =
       new JsonPrimitive(WKTUtils.write(g))
   }
-  val DateSerializer = new JsonSerializer[Date] {
+  private val DateSerializer = new JsonSerializer[Date] {
     def serialize(d: Date, t: Type, jsc: JsonSerializationContext): JsonElement =
       new JsonPrimitive(GeoToolsDateFormat.format(d.toInstant))
   }
-  val DoubleSerializer = new JsonSerializer[jDouble]() {
-    def serialize(d: jDouble, t: Type, jsc: JsonSerializationContext): JsonElement = d match {
+  private val DoubleSerializer = new JsonSerializer[jDouble]() {
+    def serialize(double: jDouble, t: Type, jsc: JsonSerializationContext): JsonElement = double match {
       /* NaN check, use null to mirror existing behavior for missing/invalid values */
       case d if jDouble.isNaN(d) => JsonNull.INSTANCE
       case d if d == jDouble.NEGATIVE_INFINITY => new JsonPrimitive("Infinity")
       case d if d == jDouble.POSITIVE_INFINITY => new JsonPrimitive("+Infinity")
-      case _ => new JsonPrimitive(d)
+      case _ => new JsonPrimitive(double)
     }
   }
-  val FloatSerializer = new JsonSerializer[jFloat]() {
-    def serialize(f: jFloat, t: Type, jsc: JsonSerializationContext): JsonElement = f match {
+  private val FloatSerializer = new JsonSerializer[jFloat]() {
+    def serialize(float: jFloat, t: Type, jsc: JsonSerializationContext): JsonElement = float match {
       /* NaN check, use null to mirror existing behavior for missing/invalid values */
       case f if jFloat.isNaN(f) => JsonNull.INSTANCE
       case f if f == jFloat.NEGATIVE_INFINITY => new JsonPrimitive("Infinity")
       case f if f == jFloat.POSITIVE_INFINITY => new JsonPrimitive("+Infinity")
-      case _ => new JsonPrimitive(f)
+      case _ => new JsonPrimitive(float)
     }
   }
 
-  val JSON: Gson = new GsonBuilder()
+  private val JSON: Gson = new GsonBuilder()
     .serializeNulls()
     .registerTypeAdapter(classOf[Double], DoubleSerializer)
     .registerTypeAdapter(classOf[jDouble], DoubleSerializer)
@@ -177,7 +184,7 @@ object Stat {
     .registerTypeHierarchyAdapter(classOf[Seq[_]], ScalaSeqSerializer)
     .create()
 
-  def apply(sft: SimpleFeatureType, s: String) = StatParser.parse(sft, s)
+  def apply(sft: SimpleFeatureType, s: String): Stat = StatParser.parse(sft, s)
 
   /**
     * String that will be parsed to a count stat

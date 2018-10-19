@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -97,7 +97,7 @@ class PrecomputedBinAggregatingIterator extends BinAggregatingIterator {
       }
       (_) => {
         val row = source.getTopKey.getRow
-        sf.setId(getId(row.getBytes, 0, row.getLength))
+        sf.setId(getId(row.getBytes, 0, row.getLength, sf))
         BinaryOutputEncoder.decode(source.getTopValue.get, callback)
         sf
       }
@@ -113,7 +113,7 @@ class PrecomputedBinAggregatingIterator extends BinAggregatingIterator {
       if (dedupe) {
         (_) => {
           val row = source.getTopKey.getRow
-          sf.setId(getId(row.getBytes, 0, row.getLength))
+          sf.setId(getId(row.getBytes, 0, row.getLength, sf))
           BinaryOutputEncoder.decode(source.getTopValue.get, callback)
           sf
         }
@@ -126,7 +126,7 @@ class PrecomputedBinAggregatingIterator extends BinAggregatingIterator {
     } else if (dedupe) {
       (_) => {
         val row = source.getTopKey.getRow
-        sf.setId(getId(row.getBytes, 0, row.getLength))
+        sf.setId(getId(row.getBytes, 0, row.getLength, sf))
         sf
       }
     } else {
@@ -258,10 +258,10 @@ object BinAggregatingIterator extends LazyLogging {
     // don't use return sft from query hints, as it will be bin_sft
     val returnSft = hints.getTransformSchema.getOrElse(sft)
 
-    val trackId = Option(hints.getBinTrackIdField).filter(_ != "id").map(sft.indexOf)
-    val geom = hints.getBinGeomField.map(sft.indexOf)
-    val dtg = hints.getBinDtgField.map(sft.indexOf)
-    val label = hints.getBinLabelField.map(sft.indexOf)
+    val trackId = Option(hints.getBinTrackIdField).filter(_ != "id").map(returnSft.indexOf)
+    val geom = hints.getBinGeomField.map(returnSft.indexOf)
+    val dtg = hints.getBinDtgField.map(returnSft.indexOf)
+    val label = hints.getBinLabelField.map(returnSft.indexOf)
 
     val encoder = BinaryOutputEncoder(returnSft, EncodingOptions(geom, dtg, trackId, label))
 
@@ -279,7 +279,7 @@ object BinAggregatingIterator extends LazyLogging {
       (e: Entry[Key, Value]) => {
         val deserialized = deserializer.deserialize(e.getValue.get())
         val row = e.getKey.getRow
-        deserialized.getIdentifier.asInstanceOf[FeatureIdImpl].setID(getId(row.getBytes, 0, row.getLength))
+        deserialized.getIdentifier.asInstanceOf[FeatureIdImpl].setID(getId(row.getBytes, 0, row.getLength, deserialized))
         val values = Array[AnyRef](encoder.encode(deserialized), GeometryUtils.zeroPoint)
         new ScalaSimpleFeature(BinaryOutputEncoder.BinEncodedSft, deserialized.getID, values)
       }

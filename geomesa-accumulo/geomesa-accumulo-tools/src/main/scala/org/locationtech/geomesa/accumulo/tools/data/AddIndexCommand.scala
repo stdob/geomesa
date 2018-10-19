@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -61,11 +61,10 @@ class AddIndexCommandExecutor(override val params: AddIndexParameters) extends R
   import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
 
   override val name = ""
+
   override def execute(): Unit = {}
 
-  override def run(): Unit = {
-    try { withDataStore(addIndex) }
-  }
+  override def run(): Unit = withDataStore(addIndex)
 
   def addIndex(ds: AccumuloDataStore): Unit  = {
 
@@ -81,7 +80,7 @@ class AddIndexCommandExecutor(override val params: AddIndexParameters) extends R
       }
     }
 
-    val existing = AccumuloFeatureIndex.indices(sft, IndexMode.Any)
+    val existing = AccumuloFeatureIndex.indices(sft)
     require(indices.forall(i => !existing.contains(i)),
       s"Requested indices already exist: ${existing.map(_.identifier).mkString("[", "][", "]")}")
     require(indices.forall(_.supports(sft)), "Requested indices are not compatible with the simple feature type")

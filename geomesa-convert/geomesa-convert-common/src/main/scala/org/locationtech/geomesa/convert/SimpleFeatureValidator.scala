@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,163 +8,259 @@
 
 package org.locationtech.geomesa.convert
 
-import java.util.Date
+import java.util.{Date, Locale, ServiceLoader}
 
+import com.typesafe.scalalogging.LazyLogging
+import com.vividsolutions.jts.geom.Geometry
 import org.locationtech.geomesa.curve.BinnedTime
+import org.locationtech.geomesa.utils.geotools.wholeWorldEnvelope
+import org.locationtech.geomesa.utils.conf.GeoMesaSystemProperties.SystemProperty
 import org.opengis.feature.simple.{SimpleFeature, SimpleFeatureType}
 
 trait SimpleFeatureValidator {
-  def name: String
+
+  /**
+    * Initialize the validator with a simple feature type. Must be called before any calls to `validate`
+    *
+    * @param sft simple feature type
+    */
   def init(sft: SimpleFeatureType): Unit
-  def validate(sf: SimpleFeature): Boolean
-  def lastError: String
+
+  /**
+    * Validate a feature
+    *
+    * @param sf simple feature
+    * @return validation error message, or null if valid
+    */
+  def validate(sf: SimpleFeature): String
 }
 
-object ValidatorLoader {
-  def createValidator(names: Seq[String], sft: SimpleFeatureType): SimpleFeatureValidator = {
+object SimpleFeatureValidator extends LazyLogging {
+
+  import scala.collection.JavaConverters._
+  import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
+
+  val property = SystemProperty("geomesa.converter.validators", IndexValidator.name)
+
+  def default: SimpleFeatureValidator = apply(property.get.split(","))
+
+  def apply(names: Seq[String]): SimpleFeatureValidator = {
     val validators = names.map {
-      case "none" => NoneValidator
-      case "has-geo" => new HasGeoValidator
-      case "has-dtg" => new HasDtgValidator
-      case "z-index" => new ZIndexValidator
-      case unk => throw new IllegalArgumentException(s"Unknown validator $unk")
+      case NoneValidator.name   => (NoneValidator, None)
+      case IndexValidator.name  => (IndexValidator, None)
+      case HasGeoValidator.name => (HasGeoValidator, None)
+      case HasDtgValidator.name => (HasDtgValidator, None)
+
+      case "z-index" =>
+        logger.warn("'z-index' validator is deprecated, using 'index' instead")
+        (IndexValidator, None)
+
+      case other =>
+        val factories = ServiceLoader.load(classOf[ValidatorFactory]).iterator().asScala
+        val i = other.indexOf('(')
+        val factory = if (i == -1 || !other.endsWith(")")) {
+          factories.find(_.name == other).map(f => (f, None))
+        } else {
+          val name = other.substring(0, i)
+          factories.find(_.name == name).map(f => (f, Some(other.substring(i + 1, other.length - 1))))
+        }
+        factory.getOrElse(throw new IllegalArgumentException(s"Unknown validator $other"))
     }
 
-    val validator = if (validators.size == 1) {
-      validators.head
+    if (validators.lengthCompare(2) < 0) {
+      val (validator, config) = validators.headOption.getOrElse((NoneValidator, None))
+      new FeatureValidator(validator, config)
     } else {
       new CompositeValidator(validators)
     }
-    validator.init(sft)
-    validator
   }
-}
 
-object NoneValidator extends SimpleFeatureValidator {
-  override def name: String = "none"
-  override def validate(sf: SimpleFeature): Boolean = true
-  override def init(sft: SimpleFeatureType): Unit = {}
-  override def lastError: String = null
-}
-
-class HasDtgValidator extends SimpleFeatureValidator {
-  private var valid: (SimpleFeature) => Boolean = _
-  private var lastErr: String = _
-
-  override def name: String = "has-dtg"
-
-  override def init(sft: SimpleFeatureType): Unit = {
-    valid = {
-      lastErr = null
-      import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
-      sft.getDtgIndex match {
-        case Some(dtgIdx) => (sf: SimpleFeature) =>
-          val res = sf.getAttribute(dtgIdx) != null
-          if (!res) {
-            lastErr = "Null date attribute"
-          }
-          res
-        case None => (_) => true
-      }
+  def unapplySeq(validator: SimpleFeatureValidator): Option[Seq[String]] = {
+    validator match {
+      case f: FeatureValidator   => Some(f.names())
+      case f: CompositeValidator => Some(f.names())
+      case _ => None
     }
   }
 
-  override def validate(sf: SimpleFeature): Boolean = valid(sf)
+  /**
+    * Factory for validators
+    */
+  trait ValidatorFactory {
+    def name: String
+    def validator(sft: SimpleFeatureType, config: Option[String]): Validator
+  }
 
-  override def lastError: String = lastErr
-}
+  /**
+    * Simplified validator interface for delegating
+    */
+  trait Validator {
 
-class HasGeoValidator extends SimpleFeatureValidator {
-  private var valid: (SimpleFeature) => Boolean = _
-  private var lastErr: String = _
+    /**
+      * Validates a feature
+      *
+      * @param sf feature
+      * @return null if valid, otherwise error message
+      */
+    def validate(sf: SimpleFeature): String
+  }
 
-  override def name: String = "has-geo"
+  /**
+    * Simple feature validator implementation that delegates to a validator factory
+    *
+    * @param factory factory
+    */
+  class FeatureValidator(factory: ValidatorFactory, config: Option[String]) extends SimpleFeatureValidator {
+    private var validator: Validator = _
+    def names(): Seq[String] = Seq(factory.name + config.map(c => s"($c)").getOrElse(""))
+    override def init(sft: SimpleFeatureType): Unit = validator = factory.validator(sft, config)
+    override def validate(sf: SimpleFeature): String = validator.validate(sf)
+  }
 
-  override def init(sft: SimpleFeatureType): Unit = {
-    valid = {
-      lastErr = null
-      if (sft.getGeometryDescriptor != null) {
-        (sf: SimpleFeature) =>
-          val res = sf.getDefaultGeometry != null
-          if (!res) {
-            lastErr = "Null geom attribute"
-          }
-          res
+  /**
+    * Evaluates multiple validators
+    *
+    * @param factories factories
+    */
+  class CompositeValidator(factories: Seq[(ValidatorFactory, Option[String])]) extends SimpleFeatureValidator {
+    private var validators: Seq[Validator] = _
+    def names(): Seq[String] =
+      factories.map { case (factory, config) => factory.name + config.map(c => s"($c)").getOrElse("") }
+    override def init(sft: SimpleFeatureType): Unit =
+      validators = factories.map { case (factory, config) => factory.validator(sft, config) }
+    override def validate(sf: SimpleFeature): String =
+      validators.foldLeft(null: String) { (error, v) =>
+        val valid = v.validate(sf)
+        if (error == null) { valid } else if (valid == null ) { error } else { s"$error, $valid" }
+      }
+  }
+
+  /**
+    * Validator based on the indices used by the feature type. Currently only the x/z2 and x/z3 indices have
+    * input requirements. In addition, features that validate against the x/z3 index will also validate against
+    * the x/z2 index
+    */
+  object IndexValidator extends ValidatorFactory {
+    override val name: String = "index"
+    override def validator(sft: SimpleFeatureType, config: Option[String]): Validator = {
+      val geom = sft.getGeomIndex
+      val dtg = sft.getDtgIndex.getOrElse(-1)
+      val enabled = sft.getIndices.collect { case (n, _, mode) if mode.write => n.toLowerCase(Locale.US) }
+      if (enabled.contains("z3") || enabled.contains("xz3") || (enabled.isEmpty && geom != -1 && dtg != -1)) {
+        val minDate = Date.from(BinnedTime.ZMinDate.toInstant)
+        val maxDate = Date.from(BinnedTime.maxDate(sft.getZ3Interval).toInstant)
+        new Z3Validator(geom, dtg, minDate, maxDate)
+      } else if (enabled.contains("z2") || enabled.contains("xz2") || (enabled.isEmpty && geom != -1)) {
+        new Z2Validator(geom)
       } else {
-        (_) => true
+        NoValidator
       }
     }
   }
 
-  override def validate(sf: SimpleFeature): Boolean = valid(sf)
+  object HasGeoValidator extends ValidatorFactory {
+    override val name: String = "has-geo"
+    override def validator(sft: SimpleFeatureType, config: Option[String]): Validator = {
+      val i = sft.getGeomIndex
+      if (i == -1) { NoValidator } else { new NullValidator(i, Errors.GeomNull) }
+    }
+  }
 
-  override def lastError: String = lastErr
-}
+  object HasDtgValidator extends ValidatorFactory {
+    override val name: String = "has-dtg"
+    override def validator(sft: SimpleFeatureType, config: Option[String]): Validator = {
+      val i = sft.getDtgIndex.getOrElse(-1)
+      if (i == -1) { NoValidator } else { new NullValidator(i, Errors.DateNull) }
+    }
+  }
 
-/**
-  * Validates that the geometry fits into a Z2 or Z3 style WGS84 index scheme
-  */
-class ZIndexValidator extends SimpleFeatureValidator {
-  private var valid: (SimpleFeature) => Boolean = _
-  private var lastErr: String = _
+  object NoneValidator extends ValidatorFactory {
+    override val name: String = "none"
+    override def validator(sft: SimpleFeatureType, config: Option[String]): Validator = NoValidator
+  }
 
-  override def name: String = "z-index"
+  /**
+    * Validates an attribute is not null
+    *
+    * @param i attribute index
+    * @param error error message
+    */
+  private class NullValidator(i: Int, error: String) extends Validator {
+    override def validate(sf: SimpleFeature): String = if (sf.getAttribute(i) == null) { error } else { null }
+  }
 
-  override def init(sft: SimpleFeatureType): Unit = {
-    valid = {
-      import org.locationtech.geomesa.utils.geotools.Conversions._
-      import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
-
-      val maxDate = BinnedTime.maxDate(sft.getZ3Interval).toDate
-      val minDate = BinnedTime.ZMinDate.toDate
-      val dtgFn: (SimpleFeature) => Boolean = sft.getDtgIndex match {
-        case Some(dtgIdx) => (sf: SimpleFeature) =>
-          lastErr = null
-          if (sf.getAttribute(dtgIdx) == null){
-            lastErr = "Null date attribute"
-            false
-          } else if (sf.get[Date](dtgIdx).before(minDate)) {
-            lastErr = "Date is before Z3 Min Date"
-            false
-          } else if (sf.get[Date](dtgIdx).after(maxDate)) {
-            lastErr = "Date is after Z3 Max Date"
-            false
-          } else {
-            true
-          }
-        case None =>
-          throw new IllegalArgumentException("Z3 validator cannot be used on a type lacking a dtg index")
+  /**
+    * Z2 validator
+    *
+    * @param geom geom index
+    */
+  private class Z2Validator(geom: Int) extends Validator {
+    override def validate(sf: SimpleFeature): String = {
+      val g = sf.getAttribute(geom).asInstanceOf[Geometry]
+      if (g == null) {
+        Errors.GeomNull
+      } else if (!wholeWorldEnvelope.contains(g.getEnvelopeInternal)) {
+        Errors.GeomBounds
+      } else {
+        null
       }
+    }
+  }
 
-      val geomFn: (SimpleFeature) => Boolean =
-        if (sft.getGeometryDescriptor != null) {
-          (sf: SimpleFeature) =>
-            lastErr = null
-            if (sf.getDefaultGeometry == null) {
-              lastErr = "Geom is null"
-              false
-            } else if (!org.locationtech.geomesa.utils.geotools.wholeWorldEnvelope.contains(sf.geometry.getEnvelopeInternal)) {
-              lastErr = "Geom is not contained in whole world envelope"
-              false
-            } else {
-              true
-            }
+  /**
+    * Z3 validator
+    *
+    * @param geom geom index
+    * @param dtg dtg index
+    * @param minDate min z3 date
+    * @param maxDate max z3 date
+    */
+  private class Z3Validator(geom: Int, dtg: Int, minDate: Date, maxDate: Date) extends Validator {
+    private val dateBefore = s"date is before minimum indexable date ($minDate)"
+    private val dateAfter = s"date is after maximum indexable date ($maxDate)"
+
+    override def validate(sf: SimpleFeature): String = {
+      val d = sf.getAttribute(dtg).asInstanceOf[Date]
+      val g = sf.getAttribute(geom).asInstanceOf[Geometry]
+      if (g == null) {
+        if (d == null) {
+          s"${Errors.GeomNull}, ${Errors.DateNull}"
+        } else if (d.before(minDate)) {
+          s"${Errors.GeomNull}, $dateBefore"
+        } else if (d.after(maxDate)) {
+          s"${Errors.GeomNull}, $dateAfter"
         } else {
-          throw new IllegalArgumentException("Z3 validator cannot be used on a type lacking a geom index")
+          Errors.GeomNull
         }
-
-      (sf: SimpleFeature) => dtgFn(sf) && geomFn(sf)
+      } else if (!wholeWorldEnvelope.contains(g.getEnvelopeInternal)) {
+        if (d == null) {
+          s"${Errors.GeomBounds}, ${Errors.DateNull}"
+        } else if (d.before(minDate)) {
+          s"${Errors.GeomBounds}, $dateBefore"
+        } else if (d.after(maxDate)) {
+          s"${Errors.GeomBounds}, $dateAfter"
+        } else {
+          Errors.GeomBounds
+        }
+      } else if (d == null) {
+        Errors.DateNull
+      } else if (d.before(minDate)) {
+        dateBefore
+      } else if (d.after(maxDate)) {
+        dateAfter
+      } else {
+        null
+      }
     }
   }
 
-  override def validate(sf: SimpleFeature): Boolean = valid(sf)
+  private object NoValidator extends Validator {
+    override def validate(sf: SimpleFeature): String = null
+  }
 
-  override def lastError: String = lastErr
-}
-
-class CompositeValidator(validators: Seq[SimpleFeatureValidator]) extends SimpleFeatureValidator {
-  override def validate(sf: SimpleFeature): Boolean = validators.forall(_.validate(sf))
-  override def init(sft: SimpleFeatureType): Unit = validators.foreach(_.init(sft))
-  override def name: String = s"CompositeValidator[${validators.map(_.name).mkString(", ")}]"
-  override def lastError: String = validators.find(_.lastError != null).map(_.lastError).orNull
+  private object Errors {
+    val GeomNull   = "geometry is null"
+    val DateNull   = "date is null"
+    val GeomBounds = s"geometry exceeds world bounds ($wholeWorldEnvelope)"
+  }
 }

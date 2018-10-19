@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -12,7 +12,6 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import com.typesafe.scalalogging.LazyLogging
 import kafka.admin.AdminUtils
-import kafka.javaapi.TopicMetadataRequest
 import org.geotools.data.memory.MemoryDataStore
 import org.geotools.data.{DataUtilities, Query, Transaction}
 import org.geotools.factory.Hints
@@ -26,9 +25,9 @@ import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes
 import org.locationtech.geomesa.utils.io.WithClose
 import org.opengis.feature.simple.SimpleFeatureType
 
-import scala.concurrent.duration.Duration
-
 class KafkaStoreTest extends LambdaTest with LazyLogging {
+
+  import scala.concurrent.duration._
 
   sequential
 
@@ -41,20 +40,8 @@ class KafkaStoreTest extends LambdaTest with LazyLogging {
   def newNamespace(): String = s"ks-test-${namespaces.getAndIncrement()}"
 
   def createTopic(ns: String, zookeepers: String, sft: SimpleFeatureType): Unit = {
-    import scala.collection.JavaConversions._
     val topic = KafkaStore.topic(ns, sft)
     KafkaStore.withZk(zookeepers)(zk => AdminUtils.createTopic(zk, topic, 2, 1))
-    // based on https://cwiki.apache.org/confluence/display/KAFKA/Finding+Topic+and+Partition+Leader
-    val Array(broker, port) = brokers.split(":")
-    val consumer = new kafka.javaapi.consumer.SimpleConsumer(broker, port.toInt, 100000, 64 * 1024, "test")
-    val req = new TopicMetadataRequest(java.util.Arrays.asList(topic))
-    var hasLeader = false
-    while (!hasLeader) {
-      Thread.sleep(100)
-      hasLeader = consumer.send(req).topicsMetadata.exists { item =>
-        item.partitionsMetadata.length == 2 && item.partitionsMetadata.forall(_.leader.host != null)
-      }
-    }
     logger.trace(s"created topic $topic")
   }
 
@@ -85,12 +72,12 @@ class KafkaStoreTest extends LambdaTest with LazyLogging {
             store1.write(feature)
             producer.flush()
             foreach(Seq(store1, store2)) { store =>
-              store.read().toSeq must eventually(40, 100.millis)(beEqualTo(Seq(feature)))
+              eventually(40, 100.millis)(store.read().toSeq must beEqualTo(Seq(feature)))
             }
           }
           WithClose(newStore(), newStore()) { (store1, store2) =>
             foreach(Seq(store1, store2)) { store =>
-              store.read().toSeq must eventually(40, 100.millis)(beEqualTo(Seq(feature)))
+              eventually(40, 100.millis)(store.read().toSeq must beEqualTo(Seq(feature)))
             }
           }
         }
@@ -119,7 +106,7 @@ class KafkaStoreTest extends LambdaTest with LazyLogging {
             store1.write(feature)
             producer.flush()
             foreach(Seq(store1, store2)) { store =>
-              store.read().toSeq must eventually(40, 100.millis)(beEqualTo(Seq(feature)))
+              eventually(40, 100.millis)(store.read().toSeq must beEqualTo(Seq(feature)))
             }
             // run once with nothing expired
             store1.persist()
@@ -130,7 +117,7 @@ class KafkaStoreTest extends LambdaTest with LazyLogging {
             clock.tick = 2000
             store1.persist()
             foreach(Seq(store1, store2)) { store =>
-              store.read() must eventually(40, 100.millis)(beEmpty)
+              eventually(40, 100.millis)(store.read() must beEmpty)
             }
             val persisted = SelfClosingIterator(ds.getFeatureReader(new Query(ns), Transaction.AUTO_COMMIT)).toSeq
             persisted.map(DataUtilities.encodeFeature) mustEqual Seq(DataUtilities.encodeFeature(feature))
@@ -166,7 +153,7 @@ class KafkaStoreTest extends LambdaTest with LazyLogging {
             store2.write(feature2)
             producer.flush()
             foreach(Seq(store1, store2)) { store =>
-              store.read().toSeq must eventually(40, 100.millis)(containTheSameElementsAs(Seq(feature1, feature2)))
+              eventually(40, 100.millis)(store.read().toSeq must containTheSameElementsAs(Seq(feature1, feature2)))
             }
             // move forward the clock to simulate an update
             clock.tick = 1
@@ -174,12 +161,12 @@ class KafkaStoreTest extends LambdaTest with LazyLogging {
             store2.write(update1)
             producer.flush()
             foreach(Seq(store1, store2)) { store =>
-              store.read().toSeq must eventually(40, 100.millis)(containTheSameElementsAs(Seq(update1, update2)))
+              eventually(40, 100.millis)(store.read().toSeq must containTheSameElementsAs(Seq(update1, update2)))
             }
             clock.tick = 2
             store1.delete(update1)
             foreach(Seq(store1, store2)) { store =>
-              store.read().toSeq must eventually(40, 100.millis)(beEqualTo(Seq(update2)))
+              eventually(40, 100.millis)(store.read().toSeq must beEqualTo(Seq(update2)))
             }
             // move the clock forward and run persistence
             clock.tick = 2000
@@ -189,7 +176,7 @@ class KafkaStoreTest extends LambdaTest with LazyLogging {
 
             store1.delete(update2)
             foreach(Seq(store1, store2)) { store =>
-              store.read().toSeq must eventually(40, 100.millis)(beEmpty)
+              eventually(40, 100.millis)(store.read().toSeq must beEmpty)
             }
             // move the clock forward and run persistence
             clock.tick = 4000
@@ -228,7 +215,7 @@ class KafkaStoreTest extends LambdaTest with LazyLogging {
             store1.write(feature1)
             producer.flush()
             foreach(Seq(store1, store2)) { store =>
-              store.read().toSeq must eventually(40, 100.millis)(beEqualTo(Seq(feature1)))
+              eventually(40, 100.millis)(store.read().toSeq must beEqualTo(Seq(feature1)))
             }
             // move forward the clock to simulate an update
             // the first feature is expired, but the update is not
@@ -236,7 +223,7 @@ class KafkaStoreTest extends LambdaTest with LazyLogging {
             store2.write(update1)
             producer.flush()
             foreach(Seq(store1, store2)) { store =>
-              store.read().toSeq must eventually(40, 100.millis)(beEqualTo(Seq(update1)))
+              eventually(40, 100.millis)(store.read().toSeq must beEqualTo(Seq(update1)))
             }
             // run persistence
             store1.persist()
@@ -251,7 +238,7 @@ class KafkaStoreTest extends LambdaTest with LazyLogging {
             clock.tick = 4000
             store2.persist()
             foreach(Seq(store1, store2)) { store =>
-              store.read() must  eventually(40, 100.millis)(beEmpty)
+              eventually(40, 100.millis)(store.read() must beEmpty)
             }
             persisted = SelfClosingIterator(ds.getFeatureReader(new Query(ns), Transaction.AUTO_COMMIT)).toSeq
             persisted.map(DataUtilities.encodeFeature) mustEqual Seq(update1).map(DataUtilities.encodeFeature)

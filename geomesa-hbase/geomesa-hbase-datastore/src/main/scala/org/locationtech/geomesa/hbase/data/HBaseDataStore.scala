@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,24 +8,31 @@
 
 package org.locationtech.geomesa.hbase.data
 
+import java.util.Collections
+
 import org.apache.hadoop.hbase.TableName
 import org.apache.hadoop.hbase.client._
+import org.apache.hadoop.hbase.filter.FilterList
 import org.apache.hadoop.hbase.security.visibility.Authorizations
 import org.geotools.data.Query
 import org.geotools.factory.Hints
 import org.locationtech.geomesa.hbase._
+import org.locationtech.geomesa.hbase.coprocessor.GeoMesaCoprocessor
+import org.locationtech.geomesa.hbase.coprocessor.aggregators.HBaseVersionAggregator
 import org.locationtech.geomesa.hbase.data.HBaseDataStoreFactory.HBaseDataStoreConfig
-import org.locationtech.geomesa.hbase.index.HBaseFeatureIndex
+import org.locationtech.geomesa.hbase.data.HBaseFeatureWriter.HBaseFeatureWriterFactory
+import org.locationtech.geomesa.hbase.index.{HBaseColumnGroups, HBaseFeatureIndex}
 import org.locationtech.geomesa.index.geotools.{GeoMesaFeatureCollection, GeoMesaFeatureSource}
-import org.locationtech.geomesa.index.iterators.DensityScan
+import org.locationtech.geomesa.index.iterators.{DensityScan, StatsScan}
 import org.locationtech.geomesa.index.metadata.{GeoMesaMetadata, MetadataStringSerializer}
 import org.locationtech.geomesa.index.planning.QueryPlanner
 import org.locationtech.geomesa.index.stats.{DistributedRunnableStats, GeoMesaStats, UnoptimizedRunnableStats}
 import org.locationtech.geomesa.index.utils._
 import org.locationtech.geomesa.utils.bin.BinaryOutputEncoder
-import org.locationtech.geomesa.utils.index.IndexMode
+import org.locationtech.geomesa.utils.io.WithClose
 import org.opengis.feature.simple.SimpleFeatureType
-import org.opengis.filter.Filter
+
+import scala.util.control.NonFatal
 
 class HBaseDataStore(val connection: Connection, override val config: HBaseDataStoreConfig)
     extends HBaseDataStoreType(config) with LocalLocking {
@@ -35,17 +42,16 @@ class HBaseDataStore(val connection: Connection, override val config: HBaseDataS
 
   override def manager: HBaseIndexManagerType = HBaseFeatureIndex
 
-  override def stats: GeoMesaStats =
+  override val stats: GeoMesaStats =
     if (config.remoteFilter) { new DistributedRunnableStats(this) } else { new UnoptimizedRunnableStats(this) }
 
-  override def createFeatureWriterAppend(sft: SimpleFeatureType,
-                                         indices: Option[Seq[HBaseFeatureIndexType]]): HBaseFeatureWriterType =
-    new HBaseAppendFeatureWriter(sft, this, indices)
+  override protected val featureWriterFactory: HBaseFeatureWriterFactory = new HBaseFeatureWriterFactory(this)
 
-  override def createFeatureWriterModify(sft: SimpleFeatureType,
-                                         indices: Option[Seq[HBaseFeatureIndexType]],
-                                         filter: Filter): HBaseFeatureWriterType =
-    new HBaseModifyFeatureWriter(sft, this, indices, filter)
+  @throws(classOf[IllegalArgumentException])
+  override protected def validateNewSchema(sft: SimpleFeatureType): Unit = {
+    super.validateNewSchema(sft)
+    HBaseColumnGroups.validate(sft)
+  }
 
   override def createSchema(sft: SimpleFeatureType): Unit = {
     import org.locationtech.geomesa.utils.geotools.RichSimpleFeatureType.RichSimpleFeatureType
@@ -56,9 +62,7 @@ class HBaseDataStore(val connection: Connection, override val config: HBaseDataS
   }
 
   override def delete(): Unit = {
-    val tables = getTypeNames.map(getSchema).flatMap { sft =>
-      manager.indices(sft, IndexMode.Any).map(_.getTableName(sft.getTypeName, this))
-    }
+    val tables = getTypeNames.flatMap(getAllIndexTableNames)
     val admin = connection.getAdmin
     try {
       (tables.distinct :+ config.catalog).map(TableName.valueOf).par.foreach { table =>
@@ -75,8 +79,6 @@ class HBaseDataStore(val connection: Connection, override val config: HBaseDataS
                             explainer: Explainer = new ExplainLogging): Seq[HBaseQueryPlan] = {
     super.getQueryPlan(query, index, explainer).asInstanceOf[Seq[HBaseQueryPlan]]
   }
-
-  override def dispose(): Unit = super.dispose()
 
   override protected def createFeatureCollection(query: Query, source: GeoMesaFeatureSource): GeoMesaFeatureCollection =
     new HBaseFeatureCollection(source, query)
@@ -97,6 +99,34 @@ class HBaseDataStore(val connection: Connection, override val config: HBaseDataS
 
   override protected def createQueryPlanner(): QueryPlanner[HBaseDataStore, HBaseFeature, Mutation] =
     new HBaseQueryPlanner(this)
+
+  override protected def loadIteratorVersions: Set[String] = {
+    import org.locationtech.geomesa.utils.conversions.ScalaImplicits.RichIterator
+
+    // just check the first table available
+    val versions = getTypeNames.iterator.map(getSchema).flatMap { sft =>
+      manager.indices(sft).iterator.flatMap { index =>
+        index.getTableNames(sft, this, None).flatMap { table =>
+          try {
+            val name = TableName.valueOf(table)
+            if (connection.getAdmin.tableExists(name)) {
+              val options = HBaseVersionAggregator.configure(sft, index)
+              WithClose(connection.getTable(name)) { t =>
+                WithClose(GeoMesaCoprocessor.execute(t, new Scan().setFilter(new FilterList()), options)) { bytes =>
+                  bytes.map(_.toStringUtf8).toList.iterator // force evaluation of the iterator before closing it
+                }
+              }
+            } else {
+              Iterator.empty
+            }
+          } catch {
+            case NonFatal(_) => Iterator.empty
+          }
+        }
+      }
+    }
+    versions.headOption.toSet
+  }
 }
 
 class HBaseQueryPlanner(ds: HBaseDataStore) extends HBaseQueryPlannerType(ds) {
@@ -110,7 +140,7 @@ class HBaseQueryPlanner(ds: HBaseDataStore) extends HBaseQueryPlannerType(ds) {
     } else if (hints.isDensityQuery) {
       DensityScan.DensitySft
     } else if (hints.isStatsQuery) {
-      KryoLazyStatsUtils.StatsSft
+      StatsScan.StatsSft
     } else {
       super.getReturnSft(sft, hints)
     }
@@ -118,6 +148,5 @@ class HBaseQueryPlanner(ds: HBaseDataStore) extends HBaseQueryPlannerType(ds) {
 }
 
 object HBaseDataStore {
-  import scala.collection.JavaConverters._
-  val EmptyAuths: java.util.List[String] = List("").asJava
+  val EmptyAuths: java.util.List[String] = Collections.singletonList("")
 }

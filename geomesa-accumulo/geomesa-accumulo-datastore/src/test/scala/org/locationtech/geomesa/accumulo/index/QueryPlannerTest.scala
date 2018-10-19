@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -20,14 +20,13 @@ import org.locationtech.geomesa.features.SerializationOption.SerializationOption
 import org.locationtech.geomesa.features.{ScalaSimpleFeature, SerializationType, SimpleFeatureSerializers}
 import org.locationtech.geomesa.utils.iterators.SortingSimpleFeatureIterator
 import org.opengis.filter.sort.SortBy
-import org.specs2.mock.Mockito
 import org.specs2.mutable.Specification
 import org.specs2.runner.JUnitRunner
 
 import scala.collection.JavaConversions._
 
 @RunWith(classOf[JUnitRunner])
-class QueryPlannerTest extends Specification with Mockito with TestWithDataStore {
+class QueryPlannerTest extends Specification with TestWithDataStore {
 
   override val spec = "*geom:Point,dtg:Date,s:String"
   val sf = new ScalaSimpleFeature(sft, "id")
@@ -87,7 +86,7 @@ class QueryPlannerTest extends Specification with Mockito with TestWithDataStore
       val result = planner.runQuery(sft, query).toList
 
       result.map(_.getID) mustEqual Seq("id", "id2")
-      forall(result)(r => r.getAttributeCount mustEqual 2) // geom always gets included
+      forall(result)(r => r.getAttributeCount mustEqual 1)
       result.map(_.getAttribute("s")) must containTheSameElementsAs(Seq("string", "astring"))
 
     }

@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -11,9 +11,13 @@ package org.locationtech.geomesa.utils.geometry
 import com.vividsolutions.jts.geom.Polygon
 import org.geotools.geometry.jts.JTS
 
+@deprecated
 object Geometry {
+
+  @deprecated
   val noPolygon : Polygon  = null
 
+  @deprecated
   implicit class RichPolygon(self: Polygon) {
     def getSafeUnion(other: Polygon): Polygon = {
       if (self != noPolygon && other != noPolygon) {

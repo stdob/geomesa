@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -8,6 +8,7 @@
 
 package org.locationtech.geomesa.accumulo.data
 
+import java.time.{Instant, ZoneOffset, ZonedDateTime}
 import java.util.Date
 
 import com.vividsolutions.jts.geom.Geometry
@@ -16,7 +17,6 @@ import org.geotools.data.simple.SimpleFeatureReader
 import org.geotools.feature.DefaultFeatureCollection
 import org.geotools.filter.text.ecql.ECQL
 import org.geotools.geometry.jts.ReferencedEnvelope
-import org.joda.time.{DateTime, DateTimeZone}
 import org.junit.runner.RunWith
 import org.locationtech.geomesa.accumulo.TestWithMultipleSfts
 import org.locationtech.geomesa.features.ScalaSimpleFeature
@@ -44,7 +44,7 @@ class AccumuloDataStoreStatsTest extends Specification with TestWithMultipleSfts
     sf.getAttribute(3).asInstanceOf[Date].getTime
   }
 
-  val dayInMillis = new DateTime(baseMillis, DateTimeZone.UTC).plusDays(1).getMillis - baseMillis
+  val dayInMillis = ZonedDateTime.ofInstant(Instant.ofEpochMilli(baseMillis), ZoneOffset.UTC).plusDays(1).toInstant.toEpochMilli - baseMillis
 
   "AccumuloDataStore" should {
     "track stats for ingested features" >> {
@@ -179,10 +179,10 @@ class AccumuloDataStoreStatsTest extends Specification with TestWithMultipleSfts
         fs.setFeatures(features)
 
         ds.stats.getCount(sft) must beSome(1)
-        // note - we don't reduce bounds during delete...
-        ds.stats.getBounds(sft) mustEqual new ReferencedEnvelope(-10, 15, -10, 10, CRS_EPSG_4326)
+        // note - with setFeatures, stats get reset
+        ds.stats.getBounds(sft) mustEqual new ReferencedEnvelope(15.0, 15.0, 0.0, 0.0, CRS_EPSG_4326)
         ds.stats.getAttributeBounds[Date](sft, "dtg").map(_.tuple) must
-            beSome((new Date(baseMillis - dayInMillis), new Date(baseMillis + dayInMillis), 4L))
+            beSome((new Date(baseMillis - dayInMillis), new Date(baseMillis - dayInMillis), 1L))
       }
 
       "update all stats" >> {

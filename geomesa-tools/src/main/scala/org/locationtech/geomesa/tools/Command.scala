@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -10,6 +10,7 @@ package org.locationtech.geomesa.tools
 
 import com.beust.jcommander.{JCommander, ParameterException}
 import org.geotools.data.{DataStore, DataStoreFinder}
+import org.locationtech.geomesa.tools.utils.Prompt
 import org.slf4j.{Logger, LoggerFactory}
 
 import scala.collection.JavaConversions._
@@ -53,11 +54,24 @@ trait DataStoreCommand[DS <: DataStore] extends Command {
   def connection: Map[String, String]
 
   @throws[ParameterException]
-  def withDataStore[T](method: (DS) => T): T = {
+  def withDataStore[T](method: DS => T): T = {
     val ds = Option(DataStoreFinder.getDataStore(connection).asInstanceOf[DS])
       .getOrElse(throw new ParameterException("Unable to create data store, please check your connection parameters."))
     try { method(ds) } finally {
       ds.dispose()
     }
   }
+}
+
+trait InteractiveCommand {
+  private var _console: Prompt.SystemConsole = _
+
+  implicit def console: Prompt.SystemConsole = {
+    if (_console == null) {
+      _console = Prompt.SystemConsole
+    }
+    _console
+  }
+
+  def setConsole(c: Prompt.SystemConsole): Unit = _console = c
 }

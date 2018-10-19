@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -9,28 +9,32 @@
 package org.locationtech.geomesa.kafka.data
 
 import java.io.IOException
+import java.util.concurrent.ScheduledExecutorService
 import java.util.{Properties, UUID}
 
-import com.github.benmanes.caffeine.cache.{CacheLoader, Caffeine, Ticker}
+import com.github.benmanes.caffeine.cache.{CacheLoader, Caffeine}
 import com.typesafe.scalalogging.LazyLogging
 import kafka.admin.AdminUtils
 import kafka.utils.ZkUtils
 import org.apache.kafka.clients.consumer.{Consumer, KafkaConsumer}
 import org.apache.kafka.clients.producer.{KafkaProducer, Producer}
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
-import org.geotools.data.simple.{SimpleFeatureReader, SimpleFeatureStore, SimpleFeatureWriter}
+import org.geotools.data.simple.{SimpleFeatureReader, SimpleFeatureStore}
 import org.geotools.data.{Query, Transaction}
 import org.locationtech.geomesa.index.geotools.GeoMesaDataStoreFactory.NamespaceConfig
 import org.locationtech.geomesa.index.geotools.{GeoMesaFeatureCollection, GeoMesaFeatureReader, GeoMesaFeatureSource, MetadataBackedDataStore}
 import org.locationtech.geomesa.index.metadata.{GeoMesaMetadata, MetadataStringSerializer}
 import org.locationtech.geomesa.index.stats.{GeoMesaStats, HasGeoMesaStats, UnoptimizedRunnableStats}
+import org.locationtech.geomesa.kafka.data.KafkaCacheLoader.KafkaCacheLoaderImpl
 import org.locationtech.geomesa.kafka.data.KafkaDataStore.KafkaDataStoreConfig
 import org.locationtech.geomesa.kafka.data.KafkaFeatureWriter.{AppendKafkaFeatureWriter, ModifyKafkaFeatureWriter}
-import org.locationtech.geomesa.kafka.index.{FeatureCacheCqEngine, FeatureCacheGuava, KafkaQueryRunner}
+import org.locationtech.geomesa.kafka.index._
 import org.locationtech.geomesa.kafka.utils.GeoMessageSerializer.GeoMessagePartitioner
 import org.locationtech.geomesa.kafka.{AdminUtilsVersions, KafkaConsumerVersions}
+import org.locationtech.geomesa.memory.cqengine.utils.CQIndexType.CQIndexType
 import org.locationtech.geomesa.security.AuthorizationsProvider
 import org.locationtech.geomesa.utils.audit.{AuditProvider, AuditWriter}
+import org.locationtech.geomesa.utils.cache.Ticker
 import org.locationtech.geomesa.utils.conf.GeoMesaSystemProperties.SystemProperty
 import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes.Configs.TABLE_SHARING_KEY
 import org.locationtech.geomesa.utils.geotools.SimpleFeatureTypes.InternalConfigs.SHARING_PREFIX_KEY
@@ -65,18 +69,18 @@ class KafkaDataStore(val config: KafkaDataStoreConfig)
 
   private val caches = Caffeine.newBuilder().build(new CacheLoader[String, KafkaCacheLoader] {
     override def load(key: String): KafkaCacheLoader = {
-      if (config.consumers < 1) {
+      if (config.consumers.count < 1) {
         logger.info("Kafka consumers disabled for this data store instance")
         KafkaCacheLoader.NoOpLoader
       } else {
         val sft = getSchema(key)
-        val cache = if (config.cqEngine) {
-          new FeatureCacheCqEngine(sft, config.cacheExpiry, config.cacheCleanup, config.cacheConsistency)(config.ticker)
-        } else {
-          new FeatureCacheGuava(sft, config.cacheExpiry, config.cacheCleanup, config.cacheConsistency)(config.ticker)
-        }
-        val consumers = KafkaDataStore.consumers(config, KafkaDataStore.topic(sft))
-        new KafkaCacheLoader.KafkaCacheLoaderImpl(sft, cache, consumers)
+        val cache = KafkaFeatureCache(sft, config.indices)
+        val topic = KafkaDataStore.topic(sft)
+        val consumers = KafkaDataStore.consumers(config, topic)
+        val frequency = KafkaDataStore.LoadIntervalProperty.toDuration.get.toMillis
+        val laz = config.indices.lazyDeserialization
+        val initialLoadConfig = if (config.consumers.consumeFromBeginning) { Some(config.indices) } else { None }
+        new KafkaCacheLoaderImpl(sft, cache, consumers, topic, frequency, laz, initialLoadConfig)
       }
     }
   })
@@ -123,7 +127,7 @@ class KafkaDataStore(val config: KafkaDataStoreConfig)
       if (AdminUtils.topicExists(zk, topic)) {
         logger.warn(s"Topic [$topic] already exists - it may contain stale data")
       } else {
-        AdminUtilsVersions.createTopic(zk, topic, config.partitions, config.replication)
+        AdminUtilsVersions.createTopic(zk, topic, config.topics.partitions, config.topics.replication)
       }
     }
   }
@@ -177,7 +181,7 @@ class KafkaDataStore(val config: KafkaDataStoreConfig)
     GeoMesaFeatureReader(sft, query, runner, None, config.audit)
   }
 
-  override def getFeatureWriter(typeName: String, filter: Filter, transaction: Transaction): SimpleFeatureWriter = {
+  override def getFeatureWriter(typeName: String, filter: Filter, transaction: Transaction): KafkaFeatureWriter = {
     val sft = getSchema(typeName)
     if (sft == null) {
       throw new IOException(s"Schema '$typeName' has not been initialized. Please call 'createSchema' first.")
@@ -185,7 +189,7 @@ class KafkaDataStore(val config: KafkaDataStoreConfig)
     new ModifyKafkaFeatureWriter(sft, producer, filter)
   }
 
-  override def getFeatureWriterAppend(typeName: String, transaction: Transaction): SimpleFeatureWriter = {
+  override def getFeatureWriterAppend(typeName: String, transaction: Transaction): KafkaFeatureWriter = {
     val sft = getSchema(typeName)
     if (sft == null) {
       throw new IOException(s"Schema '$typeName' has not been initialized. Please call 'createSchema' first.")
@@ -210,11 +214,14 @@ class KafkaDataStore(val config: KafkaDataStoreConfig)
 
 object KafkaDataStore extends LazyLogging {
 
-  import scala.collection.JavaConversions._
-
   val TopicKey = "geomesa.kafka.topic"
 
   val MetadataPath = "metadata"
+
+  val LoadIntervalProperty = SystemProperty("geomesa.kafka.load.interval", "100ms")
+
+  // marker to trigger the cq engine index when using the deprecated enable flag
+  private [kafka] val CqIndexFlag: (String, CQIndexType) = null
 
   def topic(sft: SimpleFeatureType): String = sft.getUserData.get(TopicKey).asInstanceOf[String]
 
@@ -232,39 +239,40 @@ object KafkaDataStore extends LazyLogging {
     props.put(KEY_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
     props.put(VALUE_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
     props.put(BOOTSTRAP_SERVERS_CONFIG, config.brokers)
-    config.producerConfig.foreach { case (k, v) => props.put(k, v) }
+    config.producers.properties.foreach { case (k, v) => props.put(k, v) }
     new KafkaProducer[Array[Byte], Array[Byte]](props)
   }
 
   def consumer(config: KafkaDataStoreConfig, group: String): Consumer[Array[Byte], Array[Byte]] = {
     import org.apache.kafka.clients.consumer.ConsumerConfig._
+
     val props = new Properties()
     props.put(GROUP_ID_CONFIG, group)
     props.put(ENABLE_AUTO_COMMIT_CONFIG, "false")
-    props.put(AUTO_OFFSET_RESET_CONFIG, if (config.consumeFromBeginning) { "earliest" } else { "latest" })
     props.put(KEY_DESERIALIZER_CLASS_CONFIG, classOf[ByteArrayDeserializer].getName)
     props.put(VALUE_DESERIALIZER_CLASS_CONFIG, classOf[ByteArrayDeserializer].getName)
+    props.put(AUTO_OFFSET_RESET_CONFIG, if (config.consumers.consumeFromBeginning) { "earliest" } else { "latest" })
     props.put(BOOTSTRAP_SERVERS_CONFIG, config.brokers)
-    config.consumerConfig.foreach { case (k, v) => props.put(k, v) }
+    config.consumers.properties.foreach { case (k, v) => props.put(k, v) }
     new KafkaConsumer[Array[Byte], Array[Byte]](props)
   }
 
   // creates a consumer and sets to the latest offsets
   private [kafka] def consumers(config: KafkaDataStoreConfig, topic: String): Seq[Consumer[Array[Byte], Array[Byte]]] = {
-    require(config.consumers > 0, "Number of consumers must be greater than 0")
+    require(config.consumers.count > 0, "Number of consumers must be greater than 0")
 
     val group = UUID.randomUUID().toString
 
-    logger.debug(s"Creating ${config.consumers} consumers for topic [$topic] with group-id [$group]")
+    logger.debug(s"Creating ${config.consumers.count} consumers for topic [$topic] with group-id [$group]")
 
-    Seq.fill(config.consumers) {
+    Seq.fill(config.consumers.count) {
       val consumer = KafkaDataStore.consumer(config, group)
       KafkaConsumerVersions.subscribe(consumer, topic)
       consumer
     }
   }
 
-  def withZk[T](zookeepers: String)(fn: (ZkUtils) => T): T = {
+  def withZk[T](zookeepers: String)(fn: ZkUtils => T): T = {
     val security = SystemProperty("geomesa.zookeeper.security.enabled").option.exists(_.toBoolean)
     val zkUtils = ZkUtils(zookeepers, 3000, 3000, security)
     try { fn(zkUtils) } finally {
@@ -275,19 +283,29 @@ object KafkaDataStore extends LazyLogging {
   case class KafkaDataStoreConfig(catalog: String,
                                   brokers: String,
                                   zookeepers: String,
-                                  consumers: Int,
-                                  partitions: Int,
-                                  replication: Int,
-                                  producerConfig: Properties,
-                                  consumerConfig: Properties,
-                                  consumeFromBeginning: Boolean,
-                                  cacheExpiry: Duration,
-                                  cacheCleanup: Duration,
-                                  cacheConsistency: Duration,
-                                  ticker: Ticker,
-                                  cqEngine: Boolean,
+                                  consumers: ConsumerConfig,
+                                  producers: ProducerConfig,
+                                  topics: TopicConfig,
+                                  indices: IndexConfig,
                                   looseBBox: Boolean,
                                   authProvider: AuthorizationsProvider,
                                   audit: Option[(AuditWriter, AuditProvider, String)],
                                   namespace: Option[String]) extends NamespaceConfig
+
+  case class ConsumerConfig(count: Int, properties: Map[String, String], consumeFromBeginning: Boolean)
+
+  case class ProducerConfig(properties: Map[String, String])
+
+  case class TopicConfig(partitions: Int, replication: Int)
+
+  case class IndexConfig(expiry: Duration,
+                         eventTime: Option[EventTimeConfig],
+                         resolutionX: Int,
+                         resolutionY: Int,
+                         ssiTiers: Seq[(Double, Double)],
+                         cqAttributes: Seq[(String, CQIndexType)],
+                         lazyDeserialization: Boolean,
+                         executor: Option[(ScheduledExecutorService, Ticker)])
+
+  case class EventTimeConfig(expression: String, ordering: Boolean)
 }

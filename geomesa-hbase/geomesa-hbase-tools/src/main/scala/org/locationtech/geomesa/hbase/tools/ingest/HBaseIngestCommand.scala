@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -14,7 +14,8 @@ import com.beust.jcommander.Parameters
 import org.apache.hadoop.hbase.client.Connection
 import org.locationtech.geomesa.hbase.data.HBaseDataStore
 import org.locationtech.geomesa.hbase.tools.HBaseDataStoreCommand
-import org.locationtech.geomesa.tools.CatalogParam
+import org.locationtech.geomesa.hbase.tools.HBaseDataStoreCommand.{HBaseParams, ToggleRemoteFilterParam}
+import org.locationtech.geomesa.hbase.tools.ingest.HBaseIngestCommand.HBaseIngestParams
 import org.locationtech.geomesa.tools.ingest.{IngestCommand, IngestParams}
 import org.locationtech.geomesa.utils.classpath.ClassPathUtils
 
@@ -33,5 +34,7 @@ class HBaseIngestCommand extends IngestCommand[HBaseDataStore] with HBaseDataSto
   )
 }
 
-@Parameters(commandDescription = "Ingest/convert various file formats into GeoMesa")
-class HBaseIngestParams extends IngestParams with CatalogParam
+object HBaseIngestCommand {
+  @Parameters(commandDescription = "Ingest/convert various file formats into GeoMesa")
+  class HBaseIngestParams extends IngestParams with HBaseParams with ToggleRemoteFilterParam
+}

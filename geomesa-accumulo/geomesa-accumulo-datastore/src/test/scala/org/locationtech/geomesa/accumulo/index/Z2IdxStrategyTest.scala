@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -13,17 +13,16 @@ import java.util.Date
 import com.google.common.primitives.Longs
 import org.apache.accumulo.core.security.Authorizations
 import org.geotools.data.Query
-import org.geotools.factory.CommonFactoryFinder
 import org.geotools.filter.text.ecql.ECQL
 import org.junit.runner.RunWith
 import org.locationtech.geomesa.accumulo.TestWithDataStore
 import org.locationtech.geomesa.accumulo.iterators.BinAggregatingIterator
 import org.locationtech.geomesa.curve.Z2SFC
 import org.locationtech.geomesa.features.ScalaSimpleFeature
-import org.locationtech.geomesa.utils.bin.BinaryOutputEncoder
-import org.locationtech.geomesa.utils.bin.BinaryOutputEncoder.BIN_ATTRIBUTE_INDEX
 import org.locationtech.geomesa.index.conf.QueryHints._
 import org.locationtech.geomesa.index.utils.{ExplainNull, Explainer}
+import org.locationtech.geomesa.utils.bin.BinaryOutputEncoder
+import org.locationtech.geomesa.utils.bin.BinaryOutputEncoder.BIN_ATTRIBUTE_INDEX
 import org.locationtech.sfcurve.zorder.Z2
 import org.opengis.feature.simple.SimpleFeature
 import org.opengis.filter.Filter
@@ -53,7 +52,6 @@ class Z2IdxStrategyTest extends Specification with TestWithDataStore {
     }
   addFeatures(features)
 
-  implicit val ff = CommonFactoryFinder.getFilterFactory2
   val strategy = Z2Index
   val queryPlanner = ds.queryPlanner
   val output = ExplainNull
@@ -62,11 +60,14 @@ class Z2IdxStrategyTest extends Specification with TestWithDataStore {
     "print values" in {
       skipped("used for debugging")
       println()
-      ds.connector.createScanner(Z2Index.getTableName(sftName, ds), new Authorizations()).foreach { r =>
-        val bytes = r.getKey.getRow.getBytes
-        val keyZ = Longs.fromByteArray(bytes.drop(2))
-        val (x, y) = Z2SFC.invert(Z2(keyZ))
-        println(s"row: $x $y")
+      Z2Index.getTableNames(sft, ds).foreach { table =>
+        println(table)
+        ds.connector.createScanner(table, new Authorizations()).foreach { r =>
+          val bytes = r.getKey.getRow.getBytes
+          val keyZ = Longs.fromByteArray(bytes.drop(2))
+          val (x, y) = Z2SFC.invert(Z2(keyZ))
+          println(s"row: $x $y")
+        }
       }
       println()
       success
@@ -126,8 +127,7 @@ class Z2IdxStrategyTest extends Specification with TestWithDataStore {
       val features = execute(filter, Some(Array("name")))
       features must haveSize(4)
       features.map(_.getID.toInt) must containTheSameElementsAs(6 to 9)
-      forall(features)((f: SimpleFeature) => f.getAttributeCount mustEqual 2) // geom always gets added
-      forall(features)((f: SimpleFeature) => f.getAttribute("geom") must not(beNull))
+      forall(features)((f: SimpleFeature) => f.getAttributeCount mustEqual 1)
       forall(features)((f: SimpleFeature) => f.getAttribute("name") must not(beNull))
     }
 
@@ -137,8 +137,7 @@ class Z2IdxStrategyTest extends Specification with TestWithDataStore {
       val features = execute(filter, Some(Array("derived=strConcat('my', name)")))
       features must haveSize(4)
       features.map(_.getID.toInt) must containTheSameElementsAs(6 to 9)
-      forall(features)((f: SimpleFeature) => f.getAttributeCount mustEqual 2) // geom always gets added
-      forall(features)((f: SimpleFeature) => f.getAttribute("geom") must not(beNull))
+      forall(features)((f: SimpleFeature) => f.getAttributeCount mustEqual 1)
       forall(features)((f: SimpleFeature) => f.getAttribute("derived").asInstanceOf[String] must beMatching("myname\\d"))
     }
 
@@ -147,7 +146,7 @@ class Z2IdxStrategyTest extends Specification with TestWithDataStore {
           " AND dtg between '2010-05-07T06:00:00.000Z' and '2010-05-08T00:00:00.000Z'"
       val query = new Query(sftName, ECQL.toFilter(filter), Array("geom", "dtg"))
       val qps = getQueryPlans(query)
-      forall(qps)(p => p.columnFamilies must containTheSameElementsAs(Seq(AccumuloFeatureIndex.BinColumnFamily)))
+      forall(qps)(p => p.columnFamilies must containTheSameElementsAs(Seq(AccumuloColumnGroups.BinColumnFamily)))
 
       val features = execute(filter, Some(Array("geom", "dtg")))
       features must haveSize(4)
@@ -199,7 +198,7 @@ class Z2IdxStrategyTest extends Specification with TestWithDataStore {
       aggregates.size must beLessThan(10) // ensure some aggregation was done
       forall(aggregates) { a =>
         val window = a.grouped(16).map(BinaryOutputEncoder.decode(_).dtg).sliding(2).filter(_.length > 1)
-        forall(window)(w => w.head must beLessThanOrEqualTo(w(1)))
+        forall(window.toSeq)(w => w.head must beLessThanOrEqualTo(w(1)))
       }
       val bin = aggregates.flatMap(a => a.grouped(16).map(BinaryOutputEncoder.decode))
       bin must haveSize(10)

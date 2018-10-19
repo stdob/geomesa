@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -60,9 +60,9 @@ class GeoMesaFeatureSource(val ds: DataStore with HasGeoMesaStats,
    */
   override def getCount(query: Query): Int = {
     import org.locationtech.geomesa.index.conf.QueryHints.RichHints
-    import org.locationtech.geomesa.index.conf.QueryProperties.QUERY_EXACT_COUNT
+    import org.locationtech.geomesa.index.conf.QueryProperties.QueryExactCount
 
-    val useExactCount = query.getHints.isExactCount.getOrElse(QUERY_EXACT_COUNT.get.toBoolean)
+    val useExactCount = query.getHints.isExactCount.getOrElse(QueryExactCount.get.toBoolean)
     lazy val exactCount = ds.stats.getCount(getSchema, query.getFilter, exact = true).getOrElse(-1L)
 
     val count = if (useExactCount) { exactCount } else {

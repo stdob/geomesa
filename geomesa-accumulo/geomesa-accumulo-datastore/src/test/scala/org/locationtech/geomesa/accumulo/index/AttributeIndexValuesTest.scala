@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -18,7 +18,7 @@ import org.locationtech.geomesa.accumulo.TestWithDataStore
 import org.locationtech.geomesa.arrow.io.SimpleFeatureArrowFileReader
 import org.locationtech.geomesa.features.ScalaSimpleFeature
 import org.locationtech.geomesa.index.conf.QueryHints
-import org.locationtech.geomesa.index.utils.KryoLazyStatsUtils
+import org.locationtech.geomesa.index.iterators.StatsScan
 import org.locationtech.geomesa.utils.collection.SelfClosingIterator
 import org.locationtech.geomesa.utils.io.WithClose
 import org.locationtech.geomesa.utils.stats.EnumerationStat
@@ -62,10 +62,10 @@ class AttributeIndexValuesTest extends TestWithDataStore {
           query.getHints.put(QueryHints.ENCODE_STATS, true)
           foreach(ds.getQueryPlan(query)) { plan => plan must beAnInstanceOf[BatchScanPlan] }
           val results = SelfClosingIterator(ds.getFeatureReader(query, Transaction.AUTO_COMMIT))
-          val stats = results.map(f => KryoLazyStatsUtils.decodeStat(sft)(f.getAttribute(0).asInstanceOf[String])).toList
+          val stats = results.map(f => StatsScan.decodeStat(sft)(f.getAttribute(0).asInstanceOf[String])).toList
           stats must haveLength(1)
           stats.head must beAnInstanceOf[EnumerationStat[String]]
-          stats.head.asInstanceOf[EnumerationStat[String]].attribute mustEqual sft.indexOf(enumeration)
+          stats.head.asInstanceOf[EnumerationStat[String]].property mustEqual enumeration
           val expected = expectation.map(i => features(i).getAttribute(enumeration)).groupBy(e => e).toSeq.map {
             case (e, list) => (e, list.length.toLong)
           }

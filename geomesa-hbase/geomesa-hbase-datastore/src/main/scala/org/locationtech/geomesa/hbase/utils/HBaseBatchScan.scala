@@ -1,5 +1,5 @@
 /***********************************************************************
- * Copyright (c) 2013-2017 Commonwealth Computer Research, Inc.
+ * Copyright (c) 2013-2018 Commonwealth Computer Research, Inc.
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at
@@ -15,9 +15,10 @@ import org.apache.hadoop.hbase.client._
 import org.locationtech.geomesa.index.utils.AbstractBatchScan
 
 class HBaseBatchScan(connection: Connection, tableName: TableName, ranges: Seq[Scan], threads: Int, buffer: Int)
-    extends AbstractBatchScan[Scan, Result](ranges, threads, buffer) {
-
-  private lazy val table = connection.getTable(tableName)
+    extends {
+      // use early initialization to ensure table is open before scans kick off
+      private val table = connection.getTable(tableName)
+    } with AbstractBatchScan[Scan, Result](ranges, threads, buffer) {
 
   override def close(): Unit = {
     super.close()
